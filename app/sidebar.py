@@ -336,15 +336,34 @@ class Sidebar(tk.Frame):
         if sidebar_px == int(self._sidebar_px):
             return
         self._sidebar_px = sidebar_px
-        wrap = self._name_wraplength()
         for lbl in self._name_labels:
+            self._sync_wraplength(lbl)
+
+    def _name_wraplength(self, extra_chrome: int = 0) -> int:
+        return max(60, int(self._sidebar_px) - _NAME_WRAP_CHROME_PX - extra_chrome)
+
+    def _attach_wraplength(self, lbl: tk.Label, extra_chrome: int = 0):
+        """Wrap to the label's allocated width so the count/arrow/dot on
+        the same row cannot clip the last letters of a long name."""
+        lbl.configure(wraplength=self._name_wraplength(extra_chrome))
+        lbl.bind("<Configure>", lambda e, widget=lbl: self._sync_wraplength(widget, e.width))
+        self._name_labels.append(lbl)
+
+    def _sync_wraplength(self, lbl: tk.Label, width: Optional[int] = None):
+        try:
+            allocated = int(width) if width else int(lbl.winfo_width())
+        except tk.TclError:
+            return
+        wrap = max(40, allocated - 4) if allocated > 1 else self._name_wraplength()
+        try:
+            current = int(float(lbl.cget("wraplength") or 0))
+        except (tk.TclError, TypeError, ValueError):
+            current = 0
+        if current != wrap:
             try:
                 lbl.configure(wraplength=wrap)
             except tk.TclError:
                 pass
-
-    def _name_wraplength(self) -> int:
-        return max(80, int(self._sidebar_px) - _NAME_WRAP_CHROME_PX)
 
     def _render_rows(self):
         self._name_labels = []
@@ -360,10 +379,9 @@ class Sidebar(tk.Frame):
         if not self._activities or not any(not a.is_closed() for a in self._activities):
             empty = tk.Label(self.list_frame, text="No QDM's yet. Click “+ QDM”.",
                       fg=theme.TEXT_MUTED, bg=theme.PANEL_BG,
-                      wraplength=self._name_wraplength(),
-                      font=(self.family, 9))
+                      font=(self.family, 9), justify="left")
             empty.pack(pady=14, padx=8)
-            self._name_labels.append(empty)
+            self._attach_wraplength(empty)
             self.list_container.bind_wheel_recursive(self.list_frame)
             return
 
@@ -397,10 +415,10 @@ class Sidebar(tk.Frame):
 
         empty = tk.Label(self.list_frame, text="No QDMs match that search.",
                          fg=theme.TEXT_MUTED, bg=theme.PANEL_BG,
-                         wraplength=self._name_wraplength(),
-                         font=(self.family, 9))
+                         font=(self.family, 9), justify="left")
         self._empty_search = empty
         self._track(empty, dict(pady=14, padx=8), kind="empty_search")
+        self._attach_wraplength(empty)
 
         self._apply_filter()
         # Belt-and-braces alongside ScrollArea's own auto-rebind-on-resize
@@ -467,10 +485,9 @@ class Sidebar(tk.Frame):
         font_style = f"{weight} {slant}".strip()
         name_lbl = tk.Label(
             top_line, text=act.name, bg=row_bg, fg=name_fg, anchor="w",
-            justify="left", wraplength=self._name_wraplength(),
-            font=(self.family, 10, font_style))
+            justify="left", font=(self.family, 10, font_style))
         name_lbl.pack(side="left", fill="x", expand=True)
-        self._name_labels.append(name_lbl)
+        self._attach_wraplength(name_lbl)
         if closed:
             badge = tk.Label(
                 top_line, text=(act.jira_status or "Closed").upper(),
@@ -490,9 +507,11 @@ class Sidebar(tk.Frame):
         if act.default_duration_minutes:
             meta_bits.append(f"{act.default_duration_minutes} min")
         if meta_bits:
-            tk.Label(content, text="   ·   ".join(meta_bits), bg=row_bg,
+            meta_lbl = tk.Label(content, text="   ·   ".join(meta_bits), bg=row_bg,
                      fg=theme.TEXT_MUTED if closed else theme.TEXT_SECONDARY,
-                     anchor="w", font=(self.family, 8)).pack(fill="x", pady=(2, 0))
+                     anchor="w", justify="left", font=(self.family, 8))
+            meta_lbl.pack(fill="x", pady=(2, 0))
+            self._attach_wraplength(meta_lbl)
 
         def bind_all(widget):
             widget.bind("<ButtonPress-1>", lambda e, a=act: self._on_qdm_press(e, a))
@@ -619,13 +638,16 @@ class Sidebar(tk.Frame):
             count_lbl = tk.Label(content, text=f"({', '.join(count_bits)})",
                                  bg=theme.HEADER_BG, fg=theme.TEXT_MUTED,
                                  font=(self.family, 8))
-            count_lbl.pack(side="right", padx=(6, 0))
+            # Stay on the first line when the name wraps underneath.
+            count_lbl.pack(side="right", padx=(6, 0), anchor="n")
         name_lbl = tk.Label(
             content, text=project.name, bg=theme.HEADER_BG, fg=theme.TEXT_PRIMARY,
-            anchor="w", justify="left", wraplength=self._name_wraplength(),
-            font=(self.family, 10, "bold"))
+            anchor="w", justify="left", font=(self.family, 10, "bold"))
         name_lbl.pack(side="left", fill="x", expand=True)
-        self._name_labels.append(name_lbl)
+        # Arrow + swatch + "(4)" live on this row, so the first wraplength
+        # guess has to leave room for them; <Configure> then tightens to
+        # the label's real allocated width.
+        self._attach_wraplength(name_lbl, extra_chrome=56)
 
         def bind_edit_and_menu(widget):
             widget.bind("<Double-Button-1>", lambda e, p=project: self._edit_project(p))

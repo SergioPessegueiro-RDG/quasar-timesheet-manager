@@ -15,6 +15,7 @@ from tkinter import simpledialog, ttk
 from typing import Callable, List, Optional
 
 from . import config, theme
+from .jira_client import preferred_close_transition
 from .models import Activity
 from .widgets import RoundedButton, RoundedCombobox, ScrollArea, show_saved_toast
 
@@ -23,6 +24,7 @@ from .widgets import RoundedButton, RoundedCombobox, ScrollArea, show_saved_toas
 # known_jira_projects param) rather than allowing free text that's easy
 # to typo.
 _NEW_JIRA_PROJECT_OPTION = "+ New Project…"
+_KEEP_JIRA_STATUS = "Don't change status"
 
 
 def activity_matching_jira_key(activities: List[Activity], typed: str) -> Optional[Activity]:
@@ -72,6 +74,13 @@ class TimeBlockPanel(tk.Frame):
         self.on_close = on_close
         self.on_save: Optional[Callable[[dict], bool]] = None
         self.on_delete: Optional[Callable[[], None]] = None
+        self.on_cancel: Optional[Callable[[], None]] = None
+        self._require_notes = False
+        self.on_fetch_transitions: Optional[Callable] = None
+        self._transitions = []
+        self._transition_by_label = {}
+        self._status_fetch_job = None
+        self._status_fetch_seq = 0
         self.activities: List[Activity] = []
         self.activities_by_id = {}
         self.day_labels: List[str] = []
@@ -169,7 +178,8 @@ class TimeBlockPanel(tk.Frame):
         self.end_combo.bind("<Return>", lambda e: self._save())
         row += 1
 
-        ttk.Label(frm, text="Notes").grid(row=row, column=0, sticky="nw", pady=4)
+        self.notes_label = ttk.Label(frm, text="Notes")
+        self.notes_label.grid(row=row, column=0, sticky="nw", pady=4)
         self.notes_text = tk.Text(frm, width=34, height=5, font=(self.family, 10),
                                    relief="flat", highlightthickness=1,
                                    highlightbackground=theme.BORDER_STRONG, highlightcolor=theme.ACCENT,
@@ -178,6 +188,20 @@ class TimeBlockPanel(tk.Frame):
                                    padx=6, pady=4)
         self.notes_text.grid(row=row, column=1, columnspan=2, sticky="ew", pady=4)
         row += 1
+
+        ttk.Label(frm, text="Jira Status").grid(row=row, column=0, sticky="w", pady=4)
+        self.status_var = tk.StringVar(value=_KEEP_JIRA_STATUS)
+        self.status_combo = RoundedCombobox(frm, textvariable=self.status_var,
+                                             state="readonly", width=30)
+        self.status_combo.grid(row=row, column=1, columnspan=2, sticky="ew", pady=4)
+        self.status_hint = tk.Label(
+            frm,
+            text="Optional. “Work Completed” closes the ticket in Jira; "
+                 "when every QDM in that group is closed it leaves the sidebar.",
+            bg=theme.PANEL_BG, fg=theme.TEXT_MUTED, justify="left", wraplength=360,
+            font=(self.family, 8))
+        self.status_hint.grid(row=row + 1, column=1, columnspan=2, sticky="w", pady=(0, 4))
+        row += 2
 
         self.error_label = ttk.Label(frm, text="", foreground=theme.DANGER)
         self.error_label.grid(row=row, column=0, columnspan=3, sticky="w")
@@ -218,20 +242,21 @@ class TimeBlockPanel(tk.Frame):
             self._apply_activity_fields(act)
         finally:
             self._syncing = False
+        self._schedule_status_fetch()
 
     def _on_jira_key_changed(self, *_):
         if self._syncing:
             return
         act = activity_matching_jira_key(self.activities, self.jira_key_number_var.get())
-        if act is None:
-            return
-        self._syncing = True
-        try:
-            self.activity_var.set(act.name)
-            self.activity_combo.set(act.name)
-            self._set_jira_project_from_activity(act)
-        finally:
-            self._syncing = False
+        if act is not None:
+            self._syncing = True
+            try:
+                self.activity_var.set(act.name)
+                self.activity_combo.set(act.name)
+                self._set_jira_project_from_activity(act)
+            finally:
+                self._syncing = False
+        self._schedule_status_fetch()
 
     def _selected_activity(self) -> Optional[Activity]:
         name = self.activity_var.get()
@@ -290,6 +315,66 @@ class TimeBlockPanel(tk.Frame):
             self._syncing = False
         self._previous_jira_project = name
 
+    def _keep_status_label(self) -> str:
+        act = self._selected_activity()
+        current = (act.jira_status or "").strip() if act else ""
+        if current:
+            return f"Don't change ({current})"
+        return _KEEP_JIRA_STATUS
+
+    def _reset_status_combo(self, extra_values=None):
+        keep = self._keep_status_label()
+        values = [keep] + list(extra_values or ())
+        self.status_combo.config(values=values)
+        self.status_var.set(keep)
+        self.status_combo.set(keep)
+        self._transition_by_label = {}
+
+    def _schedule_status_fetch(self):
+        if self._status_fetch_job is not None:
+            try:
+                self.after_cancel(self._status_fetch_job)
+            except tk.TclError:
+                pass
+            self._status_fetch_job = None
+        self._status_fetch_job = self.after(200, self._fetch_status_now)
+
+    def _fetch_status_now(self):
+        self._status_fetch_job = None
+        key = config.jira_key_from_number(self.jira_key_number_var.get())
+        if not key or self.on_fetch_transitions is None:
+            self._transitions = []
+            self._reset_status_combo()
+            return
+        self._status_fetch_seq += 1
+        seq = self._status_fetch_seq
+        self._reset_status_combo(["Loading statuses…"])
+        self.on_fetch_transitions(key, lambda trans, seq=seq: self._apply_transitions(seq, trans))
+
+    def _apply_transitions(self, seq: int, transitions):
+        if seq != self._status_fetch_seq:
+            return
+        self._transitions = list(transitions or [])
+        keep = self._keep_status_label()
+        labels = [keep]
+        self._transition_by_label = {}
+        close = preferred_close_transition(self._transitions)
+        ordered = []
+        if close is not None:
+            ordered.append(close)
+        ordered.extend(t for t in self._transitions if close is None or t.id != close.id)
+        for trans in ordered:
+            label = trans.label()
+            if trans.closes_ticket() and "close" not in label.lower():
+                label = f"{label} (close)"
+            if label in self._transition_by_label:
+                label = f"{label} [{trans.id}]"
+            self._transition_by_label[label] = trans
+            labels.append(label)
+        self.status_combo.config(values=labels)
+        self.status_var.set(keep)
+        self.status_combo.set(keep)
+
     # ------------------------------------------------------------------
     def load(self, activities: List[Activity], day_options,
               initial_day_idx: Optional[int], initial_start: Optional[str],
@@ -297,13 +382,22 @@ class TimeBlockPanel(tk.Frame):
               initial_notes: str, on_save: Callable[[dict], bool],
               on_delete: Optional[Callable[[], None]], start_hour: int, end_hour: int,
               slot_minutes: int, known_jira_projects: List[str],
-              initial_jira_project: str = "", is_new: bool = True):
+              initial_jira_project: str = "", is_new: bool = True,
+              require_notes: bool = False,
+              on_fetch_transitions: Optional[Callable] = None,
+              on_cancel: Optional[Callable[[], None]] = None):
         self.activities = activities
         self.activities_by_id = {a.id: a for a in activities}
         self.on_save = on_save
         self.on_delete = on_delete
-
+        self.on_cancel = on_cancel
+        self.on_fetch_transitions = on_fetch_transitions
+        self._require_notes = require_notes
         self.heading.config(text="New Time Block" if is_new else "Edit Time Block")
+        if require_notes:
+            self.notes_label.config(text="Description")
+        else:
+            self.notes_label.config(text="Notes")
 
         self.day_labels = [label for label, _key in day_options]
         self.day_key_by_label = {label: key for label, key in day_options}
@@ -319,6 +413,11 @@ class TimeBlockPanel(tk.Frame):
         while t <= end_total:
             self.time_options.append(f"{t // 60:02d}:{t % 60:02d}")
             t += slot_minutes
+        for extra in (initial_start, initial_end):
+            stamp = (extra or "").strip()
+            if stamp and stamp not in self.time_options:
+                self.time_options.append(stamp)
+        self.time_options.sort()
         self.start_combo.config(values=self.time_options)
         self.end_combo.config(values=self.time_options)
 
@@ -386,7 +485,11 @@ class TimeBlockPanel(tk.Frame):
                       command=self._save).pack(side="right", padx=6)
         self._scroll.bind_wheel_recursive(self.btns)
 
-        self.activity_combo.focus_set()
+        if require_notes:
+            self.notes_text.focus_set()
+        else:
+            self.activity_combo.focus_set()
+        self._schedule_status_fetch()
 
     # ------------------------------------------------------------------
     def _save(self):
@@ -398,6 +501,14 @@ class TimeBlockPanel(tk.Frame):
         end = self.end_var.get()
         if start >= end:
             self.error_label.config(text="End time must be after start time.")
+            return
+        notes = self.notes_text.get("1.0", "end").strip()
+        trans = self._transition_by_label.get(self.status_var.get())
+        closing = bool(trans and trans.closes_ticket())
+        if (self._require_notes or closing) and not notes:
+            self.error_label.config(
+                text="Add a description — Jira requires one on the worklog.")
+            self.notes_text.focus_set()
             return
 
         jira_project = self.jira_project_var.get().strip()
@@ -412,12 +523,12 @@ class TimeBlockPanel(tk.Frame):
             "day_idx": self.day_key_by_label[self.day_var.get()],
             "start_time": start,
             "end_time": end,
-            "notes": self.notes_text.get("1.0", "end").strip(),
+            "notes": notes,
             "jira_project": jira_project,
-            # No longer editable here (see the comment near the fields
-            # above) -- Jira Issue Type comes from app/config.py's fixed
-            # default at export time instead.
             "issue_type": None,
+            "jira_transition_id": trans.id if trans else None,
+            "jira_transition_to_name": (trans.to_name or trans.name) if trans else None,
+            "jira_transition_to_category": trans.to_category if trans else None,
         }
         assert self.on_save is not None
         ok = self.on_save(result)
@@ -426,7 +537,10 @@ class TimeBlockPanel(tk.Frame):
             self.on_close()
 
     def _cancel(self):
+        cb = self.on_cancel
         self.on_close()
+        if cb:
+            cb()
 
     def _delete(self):
         cb = self.on_delete

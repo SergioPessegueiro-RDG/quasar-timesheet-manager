@@ -336,6 +336,28 @@ win.update()
 check("A wheel event over the calendar (not the sidebar list) leaves the sidebar's scroll position alone",
       sidebar_canvas.yview()[0] == 0.0)
 
+print("\n--- Calendar grid scrolls vertically under the pointer ---")
+# Tk 9 maps two-finger swipes to <TouchpadScroll>, not <MouseWheel>. The
+# handler below is the classic-wheel path; calling it directly proves the
+# grid's scroll host actually moves. Overflow is forced via scrollregion
+# so this doesn't depend on zoom/window size.
+cal_host = win.calendar._scroll_host
+cal_host.config(scrollregion=(0, 0, 2000, 4000))
+cal_host.yview_moveto(0)
+win.update()
+check("Calendar starts at the top of an overflowing grid", cal_host.yview()[0] == 0.0)
+win.calendar._on_mousewheel(types.SimpleNamespace(num=5, delta=-120))
+win.update()
+check("Wheel-down moves the calendar grid", cal_host.yview()[0] > 0.0)
+check("Pointer over the calendar canvas is treated as over the grid",
+      win.calendar._is_over_calendar(win.calendar.canvas) is True)
+check("Pointer over the sidebar is not treated as over the calendar",
+      win.calendar._is_over_calendar(win.sidebar.canvas) is False)
+vw, vh = win.calendar._last_viewport_size
+if vw > 1 and vh > 1:
+    win.calendar._recompute_grid_dimensions(vw, vh)
+win.update()
+
 print("\n--- Custom vector scrollbar (ttk.Scrollbar doesn't render reliably here) ---")
 # ttk.Scrollbar's "clam"-theme thumb was found to not paint at all in this
 # app's headless/Xvfb environment, even with correct pack ordering and

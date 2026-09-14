@@ -57,7 +57,7 @@ class Activity:
         name = (self.jira_status or "").strip().lower()
         return name in {
             "done", "closed", "resolved", "cancelled", "canceled",
-            "declined", "complete", "completed", "won't do",
+            "declined", "complete", "completed", "work completed", "won't do",
         }
 
 
@@ -79,11 +79,27 @@ class TimeEntry:
     # of posting a duplicate. None means never pushed (or pushed via the
     # old CSV path, which Jira doesn't give us an id back for).
     jira_worklog_id: Optional[str] = None
+    # Issue key the stored worklog id actually lives on, and a fingerprint
+    # of the last payload we successfully sent. Together they let a later
+    # push skip untouched blocks, PUT real edits, and DELETE+POST when the
+    # block is moved to a different QDM.
+    jira_worklog_issue: Optional[str] = None
+    jira_worklog_fingerprint: Optional[str] = None
 
     def duration_minutes(self) -> int:
         sh, sm = (int(x) for x in self.start_time.split(":"))
         eh, em = (int(x) for x in self.end_time.split(":"))
         return (eh * 60 + em) - (sh * 60 + sm)
+
+
+@dataclass
+class PendingWorklogDelete:
+    """A Jira worklog that should be removed on the next push, after the
+    local time block that owned it was deleted."""
+    id: Optional[int]
+    jira_key: str
+    jira_worklog_id: str
+    date: str          # "YYYY-MM-DD" of the deleted block, for range pushes
 
 
 @dataclass

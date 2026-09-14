@@ -55,7 +55,11 @@ class TestRoundedRectSdf(unittest.TestCase):
         centre = theme._aa_pixel(10, 10, (0.5, 0.5, 19.5, 19.5), 6, fill, bg, outline, 1.0)
         self.assertEqual(centre, fill)
 
-    def test_mix_is_used_for_theme_colors(self):
+    def test_rounded_rect_points_fixed_steps_keep_a_stable_coord_count(self):
+        short = theme.rounded_rect_points(0, 0, 100, 20, radius=12, steps=20)
+        tall = theme.rounded_rect_points(0, 0, 100, 400, radius=12, steps=20)
+        self.assertEqual(len(short), len(tall))
+        self.assertGreater(len(short), 8)
         previous = theme.get_theme_id()
         try:
             theme.set_theme("ink_wash")

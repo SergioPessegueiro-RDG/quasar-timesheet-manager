@@ -1151,32 +1151,33 @@ def rounded_rect(canvas, x1, y1, x2, y2, radius: float = 8, exponent: float = 4.
     if radius <= 0:
         return canvas.create_rectangle(x1, y1, x2, y2, **kwargs)
 
-    # Each corner's own center plus the start/end angle (degrees, standard
-    # math convention: 0=east, 90=north) of the quarter-circle arc that
-    # belongs to it. Consecutive corners are listed so each one's end angle
-    # picks up where the next begins (90 -> 0 -> -90 -> -180 -> back to 90),
-    # one continuous sweep around the whole shape -- the straight edges
-    # need no separate points at all, since a polygon already connects
-    # consecutive points with straight lines, and each arc's sampled
-    # endpoints already sit exactly on the straight edges (e.g. the
-    # top-right corner's start point, at angle 90, is (x2-radius, y1) --
-    # precisely where the top edge ends).
+    points = rounded_rect_points(x1, y1, x2, y2, radius=radius, exponent=exponent)
+    return canvas.create_polygon(points, **kwargs)
+
+
+def rounded_rect_points(x1, y1, x2, y2, radius: float = 8, exponent: float = 4.0,
+                        steps=None):
+    """Flat [x, y, ...] list for a superellipse rounded rect.
+
+    Live calendar previews reuse the same point count every motion
+    (`steps` fixed) so `canvas.coords` can reshape the polygon without
+    recreating it — a PhotoImage per mouse-pixel would hitch, and a
+    plain `create_rectangle` looks stair-stepped on Retina.
+    """
+    x1, x2 = (x1, x2) if x1 <= x2 else (x2, x1)
+    y1, y2 = (y1, y2) if y1 <= y2 else (y2, y1)
+    radius = max(0.0, min(float(radius), (x2 - x1) / 2, (y2 - y1) / 2))
+    if radius <= 0:
+        return [x1, y1, x2, y1, x2, y2, x1, y2]
     corners = [
-        (x2 - radius, y1 + radius, 90, 0),      # top-right
-        (x2 - radius, y2 - radius, 0, -90),     # bottom-right
-        (x1 + radius, y2 - radius, -90, -180),  # bottom-left
-        (x1 + radius, y1 + radius, -180, -270),  # top-left
+        (x2 - radius, y1 + radius, 90, 0),
+        (x2 - radius, y2 - radius, 0, -90),
+        (x1 + radius, y2 - radius, -90, -180),
+        (x1 + radius, y1 + radius, -180, -270),
     ]
-    # Dense enough that a Retina display doesn't show the corner as a
-    # hexagon. Buttons themselves use rounded_rect_image() for true
-    # coverage anti-aliasing; this path is for large cards/blocks.
-    steps = max(18, int(radius * 2.5))
-    # Superellipse exponent: |cos|**(2/n) in place of plain cos generalizes
-    # the circle (n=2, where 2/n=1 and this collapses back to plain cos)
-    # into Apple's flatter-curved, longer-tangent "continuous corner" shape
-    # for n>2. copysign keeps each term's original sign since abs() strips
-    # it before the fractional power (a negative base to a fractional power
-    # is undefined/complex in general).
+    if steps is None:
+        steps = max(18, int(radius * 2.5))
+    steps = max(4, int(steps))
     power = 2.0 / exponent
     points = []
     for cx, cy, start_deg, end_deg in corners:
@@ -1186,12 +1187,8 @@ def rounded_rect(canvas, x1, y1, x2, y2, radius: float = 8, exponent: float = 4.
             cos_v = math.cos(rad)
             sin_v = math.sin(rad)
             points.append(cx + radius * math.copysign(abs(cos_v) ** power, cos_v))
-            # Canvas y increases downward (screen coordinates), unlike the
-            # standard math y-axis this angle convention assumes -- so the
-            # sign flips here to keep "up" (positive sin) meaning a
-            # smaller y on screen.
             points.append(cy - radius * math.copysign(abs(sin_v) ** power, sin_v))
-    return canvas.create_polygon(points, **kwargs)
+    return points
 
 
 def _sdf_rounded_rect(px: float, py: float, x1: float, y1: float,
@@ -1219,6 +1216,17 @@ def _coverage(distance: float) -> float:
     if value >= 1.0:
         return 1.0
     return value
+
+
+def _average_hex(colors) -> str:
+    n = len(colors) or 1
+    acc = [0, 0, 0]
+    for color in colors:
+        rgb = _hex_to_rgb(color)
+        acc[0] += rgb[0]
+        acc[1] += rgb[1]
+        acc[2] += rgb[2]
+    return _rgb_to_hex((acc[0] / n, acc[1] / n, acc[2] / n))
 
 
 def _aa_pixel(px: float, py: float, box, radius: float, fill: str,
@@ -1273,13 +1281,23 @@ def _make_aa_image(width: int, height: int, radius: float, fill: str,
     if cached is not None:
         return cached
     rows = []
+    def sample(px, py, bg=background):
+        dist = _sdf_rounded_rect(px, py, box[0], box[1], box[2], box[3], radius)
+        centre = _aa_pixel(px, py, box, radius, fill, bg, outline, stroke)
+        # Interior/exterior pixels are a solid mix; only the 1px edge
+        # needs extra samples so Retina upscaling doesn't stair-step.
+        if abs(dist) > 1.15 and not (stroke > 0.0 and outline and abs(dist) < stroke + 1.15):
+            return centre
+        colors = [
+            _aa_pixel(px + dx, py + dy, box, radius, fill, bg, outline, stroke)
+            for dx, dy in ((-0.25, -0.25), (0.25, -0.25), (-0.25, 0.25), (0.25, 0.25))
+        ]
+        return _average_hex(colors)
+
     if uniform:
         for y in range(height):
             py = y + 0.5
-            cells = [
-                _aa_pixel(x + 0.5, py, box, radius, fill, background, outline, stroke)
-                for x in range(width)
-            ]
+            cells = [sample(x + 0.5, py) for x in range(width)]
             rows.append("{" + " ".join(cells) + "}")
     else:
         mid_x = width / 2.0
@@ -1291,8 +1309,7 @@ def _make_aa_image(width: int, height: int, radius: float, fill: str,
             cells = []
             for x in range(width):
                 bg = row_left if (x + 0.5) < mid_x else row_right
-                cells.append(_aa_pixel(
-                    x + 0.5, py, box, radius, fill, bg, outline, stroke))
+                cells.append(sample(x + 0.5, py, bg))
             rows.append("{" + " ".join(cells) + "}")
     img = tk.PhotoImage(width=width, height=height)
     img.put(" ".join(rows))
@@ -1325,8 +1342,8 @@ def _keep_aa_image(canvas, img):
         canvas._aa_images = [img]
         return
     kept.append(img)
-    if len(kept) > 240:
-        canvas._aa_images = kept[-80:]
+    if len(kept) > 480:
+        canvas._aa_images = kept[-240:]
 
 
 def _corner_patch(corner: str, size: int, radius: float, fill: str,
@@ -1345,7 +1362,7 @@ def _corner_patch(corner: str, size: int, radius: float, fill: str,
 
 def place_rounded_rect(canvas, x1, y1, x2, y2, radius: float = 8, fill: str = "",
                        outline: str = "", width: float = 1, background: str = None,
-                       corner_backgrounds=None, **item_kwargs):
+                       corner_backgrounds=None, full: bool = False, **item_kwargs):
     """Draw a coverage-antialiased rounded rect on `canvas`.
 
     Small chips (buttons, thumbs, swatches, short time blocks) are a
@@ -1389,7 +1406,10 @@ def place_rounded_rect(canvas, x1, y1, x2, y2, radius: float = 8, fill: str = ""
     radius = max(0.0, min(float(radius), w / 2.0, h / 2.0))
     bgs = None if uniform else (nw, ne, sw, se)
     try:
-        if w * h <= 16000:
+        # Tall calendar blocks used to trip the "four tiny corner patches"
+        # path and look pixelated when you stretched duration. `full=True`
+        # keeps one coverage-AA image for the whole shape.
+        if full or w * h <= 48000:
             img = _make_aa_image(
                 w, h, radius, fill, paint_bg, outline, stroke, backgrounds=bgs)
             _keep_aa_image(canvas, img)

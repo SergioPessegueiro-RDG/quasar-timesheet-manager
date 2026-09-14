@@ -282,6 +282,16 @@ class TestPushWorklogs(unittest.TestCase):
         self.assertEqual(result.created, 1)
         stored = self.db.get_time_entry(self.entry_id)
         self.assertEqual(stored.jira_worklog_id, "10001")
+        self.assertEqual(stored.jira_worklog_issue, "QDM-42")
+        self.assertEqual(
+            stored.jira_worklog_fingerprint,
+            jira_sync.worklog_fingerprint(stored))
+
+    def _mark_synced(self, worklog_id="10001"):
+        entry = self.db.get_time_entry(self.entry_id)
+        self.db.mark_time_entry_worklog_synced(
+            self.entry_id, worklog_id, entry.jira_key,
+            jira_sync.worklog_fingerprint(entry))
 
     def test_second_push_updates_existing_worklog(self):
         self.db.set_time_entry_worklog_id(self.entry_id, "10001")
@@ -304,6 +314,90 @@ class TestPushWorklogs(unittest.TestCase):
             result = jira_sync.push_worklogs(self.db, self.creds, [self.db.get_time_entry(eid)])
         add.assert_not_called()
         self.assertEqual(len(result.skipped), 1)
+
+    def test_second_push_skips_unchanged_worklog(self):
+        self._mark_synced()
+        with patch.object(jira_client, "update_worklog") as upd:
+            with patch.object(jira_client, "add_worklog") as add:
+                entries = [self.db.get_time_entry(self.entry_id)]
+                result = jira_sync.push_worklogs(self.db, self.creds, entries)
+        upd.assert_not_called()
+        add.assert_not_called()
+        self.assertEqual(result.unchanged, 1)
+        self.assertEqual(result.updated, 0)
+        self.assertEqual(result.created, 0)
+
+    def test_second_push_updates_when_notes_change(self):
+        self._mark_synced()
+        entry = self.db.get_time_entry(self.entry_id)
+        entry.notes = "rewrote the comment"
+        self.db.update_time_entry(entry)
+        with patch.object(jira_client, "update_worklog", return_value="10001") as upd:
+            with patch.object(jira_client, "add_worklog") as add:
+                result = jira_sync.push_worklogs(
+                    self.db, self.creds, [self.db.get_time_entry(self.entry_id)])
+        upd.assert_called_once()
+        add.assert_not_called()
+        self.assertEqual(result.updated, 1)
+        stored = self.db.get_time_entry(self.entry_id)
+        self.assertEqual(
+            stored.jira_worklog_fingerprint,
+            jira_sync.worklog_fingerprint(stored))
+
+    def test_color_change_is_not_a_worklog_update(self):
+        self._mark_synced()
+        entry = self.db.get_time_entry(self.entry_id)
+        entry.color = "#FF0000"
+        self.db.update_time_entry(entry)
+        with patch.object(jira_client, "update_worklog") as upd:
+            result = jira_sync.push_worklogs(
+                self.db, self.creds, [self.db.get_time_entry(self.entry_id)])
+        upd.assert_not_called()
+        self.assertEqual(result.unchanged, 1)
+
+    def test_moving_to_another_qdm_deletes_old_and_posts_new(self):
+        self._mark_synced()
+        entry = self.db.get_time_entry(self.entry_id)
+        entry.jira_key = "QDM-99"
+        self.db.update_time_entry(entry)
+        with patch.object(jira_client, "delete_worklog") as delete:
+            with patch.object(jira_client, "add_worklog", return_value="20002") as add:
+                with patch.object(jira_client, "update_worklog") as upd:
+                    result = jira_sync.push_worklogs(
+                        self.db, self.creds, [self.db.get_time_entry(self.entry_id)])
+        delete.assert_called_once_with(self.creds, "QDM-42", "10001")
+        add.assert_called_once()
+        upd.assert_not_called()
+        self.assertEqual(result.created, 1)
+        self.assertEqual(result.deleted, 1)
+        stored = self.db.get_time_entry(self.entry_id)
+        self.assertEqual(stored.jira_worklog_id, "20002")
+        self.assertEqual(stored.jira_worklog_issue, "QDM-99")
+
+    def test_deleting_a_pushed_block_removes_jira_worklog_on_push(self):
+        self._mark_synced()
+        self.db.delete_time_entry(self.entry_id)
+        pending = self.db.list_pending_worklog_deletes("2026-07-24", "2026-07-24")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0].jira_worklog_id, "10001")
+        with patch.object(jira_client, "delete_worklog") as delete:
+            with patch.object(jira_client, "add_worklog") as add:
+                result = jira_sync.push_worklogs(
+                    self.db, self.creds, [], "2026-07-24", "2026-07-24")
+        delete.assert_called_once_with(self.creds, "QDM-42", "10001")
+        add.assert_not_called()
+        self.assertEqual(result.deleted, 1)
+        self.assertEqual(
+            self.db.list_pending_worklog_deletes("2026-07-24", "2026-07-24"), [])
+
+    def test_restoring_a_deleted_block_cancels_pending_jira_delete(self):
+        self._mark_synced()
+        entry = self.db.get_time_entry(self.entry_id)
+        self.db.delete_time_entry(self.entry_id)
+        self.assertEqual(len(self.db.list_pending_worklog_deletes()), 1)
+        entry.id = None
+        self.db.add_time_entry(entry)
+        self.assertEqual(self.db.list_pending_worklog_deletes(), [])
 
 
 class TestJiraHttp(unittest.TestCase):
@@ -335,6 +429,36 @@ class TestJiraHttp(unittest.TestCase):
         creds = jira_client.JiraCredentials("http://jira.example.com", "a@b.c", "tok")
         with self.assertRaises(jira_client.JiraError):
             jira_client.test_connection(creds)
+
+
+class TestTransitions(unittest.TestCase):
+    def test_parse_and_prefer_work_completed(self):
+        payload = {
+            "transitions": [
+                {"id": "21", "name": "In Progress", "to": {
+                    "name": "In Progress",
+                    "statusCategory": {"key": "indeterminate"},
+                }},
+                {"id": "31", "name": "Work Completed", "to": {
+                    "name": "Work Completed",
+                    "statusCategory": {"key": "done"},
+                }},
+            ]
+        }
+        trans = jira_client.parse_transitions(payload)
+        self.assertEqual(len(trans), 2)
+        close = jira_client.preferred_close_transition(trans)
+        self.assertIsNotNone(close)
+        self.assertEqual(close.id, "31")
+        self.assertTrue(close.closes_ticket())
+        self.assertFalse(trans[0].closes_ticket())
+
+    def test_work_completed_status_is_closed_locally(self):
+        act = Activity(1, "QA Planning", jira_key="QDM-5557",
+                       jira_status="Work Completed", jira_status_category="done")
+        self.assertTrue(act.is_closed())
+        by_name = Activity(2, "Other", jira_status="Work Completed")
+        self.assertTrue(by_name.is_closed())
 
 
 if __name__ == "__main__":

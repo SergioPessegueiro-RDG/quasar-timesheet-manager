@@ -7,6 +7,7 @@ import time
 import tkinter as tk
 import traceback
 import webbrowser
+from datetime import date
 from tkinter import messagebox, ttk
 from typing import Optional
 
@@ -341,7 +342,8 @@ class MainWindow(tk.Tk):
             self.timer_bar = TimerBar(
                 self, self.db, get_activities=lambda: self.db.list_activities(),
                 on_saved=self._on_timer_saved, family=self.family,
-                initial_state=initial_timer_state)
+                initial_state=initial_timer_state,
+                on_need_notes=self._prompt_timer_notes)
             return
 
         bar = tk.Frame(self, bg=theme.PANEL_BG)
@@ -362,16 +364,57 @@ class MainWindow(tk.Tk):
                      font=(self.family, profile["title_pt"], "bold"),
                      bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY).pack(side="left")
 
+        status = None
+        if show_timer:
+            # Confirmation after Stop lives here in the leftover header gap
+            # (between the title and the timer), not inside TimerBar. The
+            # timer cluster is packed right first so its width never includes
+            # that message — otherwise "Logged 15 min to …" shoves the picker
+            # left. width=1 + expand is the Tk clip trick: the label only
+            # takes leftover space and won't steal width from the controls.
+            status = tk.Label(
+                inner, text="", font=(self.family, 9), bg=theme.PANEL_BG,
+                fg=theme.TEXT_SECONDARY, anchor="center", width=1)
         self.timer_bar = TimerBar(
             inner if show_timer else self, self.db,
             get_activities=lambda: self.db.list_activities(),
             on_saved=self._on_timer_saved, family=self.family,
-            initial_state=initial_timer_state, bg=theme.PANEL_BG)
+            initial_state=initial_timer_state, bg=theme.PANEL_BG,
+            status_widget=status,
+            on_need_notes=self._prompt_timer_notes)
         if show_timer:
             self.timer_bar.pack(side="right" if show_header else "left")
+            status.pack(side="left", fill="x", expand=True, padx=12)
 
         sep = tk.Frame(self, bg=theme.BORDER, height=1)
         sep.pack(fill="x")
+
+    def _prompt_timer_notes(self, activity, date_str: str, start_str: str, end_str: str):
+        """Stop-timer path: same Time Block description prompt as placing a QDM."""
+        self.calendar._go_today()
+        log_date = date.fromisoformat(date_str)
+        day_idx = (log_date - self.calendar.week_start).days
+        force_date = None
+        if not (0 <= day_idx < len(config.DAY_NAMES)):
+            day_idx = 0
+            force_date = date_str
+
+        def on_committed(entry):
+            mins = entry.duration_minutes()
+            self.timer_bar._set_status(f"Logged {mins} min to {entry.activity_name}.")
+
+        def on_cancelled():
+            self.timer_bar._set_status("Timer stopped — nothing logged.")
+
+        self.calendar._open_entry_dialog(
+            new=True, day_idx=day_idx,
+            start_hhmm=start_str, end_hhmm=end_str,
+            placed_activity=activity,
+            require_notes=True,
+            force_date=force_date,
+            on_committed=on_committed,
+            on_cancelled=on_cancelled,
+        )
 
     def _on_timer_saved(self, entry):
         # The timer always logs against *today*, regardless of which tab or
@@ -868,8 +911,63 @@ class MainWindow(tk.Tk):
 
     def _open_time_block_panel(self, **kwargs):
         kwargs["known_jira_projects"] = self.db.list_known_jira_projects()
+        inner_save = kwargs.get("on_save")
+        kwargs["on_save"] = lambda result, inner=inner_save: self._save_time_block_and_status(inner, result)
+        kwargs["on_fetch_transitions"] = self._fetch_jira_transitions
         self.timeblock_panel.load(**kwargs)
         self._show_panel(self.timeblock_panel)
+
+    def _fetch_jira_transitions(self, issue_key: str, done):
+        creds = self._jira_creds()
+        if not creds.is_complete():
+            self.after(0, lambda: done([]))
+            return
+
+        def worker():
+            try:
+                transitions = jira_client.list_transitions(creds, issue_key)
+            except Exception as exc:
+                jira_client._log(f"list_transitions {issue_key} failed: {exc}")
+                transitions = []
+            self.after(0, lambda trans=transitions: done(trans))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _save_time_block_and_status(self, inner_save, result: dict):
+        ok = inner_save(result) if inner_save else True
+        if ok is False:
+            return False
+        trans_id = (result.get("jira_transition_id") or "").strip()
+        key = (result.get("jira_key") or "").strip()
+        if not trans_id or not key:
+            return ok
+        creds = self._jira_creds()
+        if not creds.is_complete():
+            self._jira_alert(
+                "Jira status",
+                "The time block was saved, but Jira isn’t configured so the "
+                "ticket status was left as-is.")
+            return ok
+        try:
+            jira_client.transition_issue(creds, key, trans_id)
+        except Exception as exc:
+            jira_client._log(f"transition_issue {key} failed: {exc}")
+            self._jira_alert(
+                "Jira status",
+                "The time block was saved, but Jira didn’t accept the status "
+                f"change:\n\n{exc}")
+            return ok
+        act = self.db.get_activity_by_jira_key(key)
+        if act is not None:
+            to_name = (result.get("jira_transition_to_name") or "").strip()
+            to_cat = (result.get("jira_transition_to_category") or "").strip() or None
+            if to_name:
+                act.jira_status = to_name
+            if to_cat:
+                act.jira_status_category = to_cat
+            self.db.update_activity(act)
+            self._on_sidebar_change()
+        return ok
 
     def _open_duplicate_panel(self, **kwargs):
         self.duplicate_panel.load(**kwargs)
@@ -1258,36 +1356,66 @@ class MainWindow(tk.Tk):
             self._open_settings_dialog()
             return
         entries = self.db.list_time_entries_between(start_date, end_date)
-        if not entries:
+        pending = self.db.list_pending_worklog_deletes(start_date, end_date)
+        if not entries and not pending:
             self._jira_alert("Push to Jira", "There are no time blocks in that date range.", kind="info")
             return
 
-        ready = [e for e in entries if (e.jira_key or "").strip()]
-        skipped_n = len(entries) - len(ready)
-        if not ready:
-            self._jira_alert(
-                "Push to Jira",
-                "None of those time blocks have a Jira Issue Key, so nothing "
-                "would be logged.\n\nCSV export uses the same rule — assign a "
-                "QDM (issue key) on each block first.",
-                kind="info")
+        plan = jira_sync.plan_worklog_push(entries, pending)
+        if not plan.has_jira_writes():
+            if not entries:
+                self._jira_alert(
+                    "Push to Jira", "There are no time blocks in that date range.", kind="info")
+            elif plan.skipped and not plan.unchanged and not plan.too_short:
+                self._jira_alert(
+                    "Push to Jira",
+                    "None of those time blocks have a Jira Issue Key, so nothing "
+                    "would be logged.\n\nCSV export uses the same rule — assign a "
+                    "QDM (issue key) on each block first.",
+                    kind="info")
+            else:
+                self._jira_alert(
+                    "Push to Jira",
+                    "Nothing to send — every block in that range is already "
+                    "up to date in Jira, or is shorter than 1 minute.\n\n"
+                    "Untouched hours are skipped.",
+                    kind="info")
             return
 
-        will_update = sum(1 for e in ready if e.jira_worklog_id)
-        will_create = len(ready) - will_update
         lines = [
             f"Log hours to Jira for {start_date} – {end_date}?",
             "",
-            f"  • {will_create} new worklog(s) will be added",
-            f"  • {will_update} existing worklog(s) will be updated "
-            "(already pushed from this app — not duplicated)",
         ]
-        if skipped_n:
-            lines.append(f"  • {skipped_n} block(s) skipped (no Jira Issue Key)")
+        if plan.create:
+            lines.append(f"  • {len(plan.create)} new worklog(s) will be added")
+        if plan.update:
+            lines.append(
+                f"  • {len(plan.update)} existing worklog(s) will be updated "
+                "(description, time, or day changed)")
+        if plan.move:
+            lines.append(
+                f"  • {len(plan.move)} worklog(s) will be moved to a different QDM")
+        if plan.remove_key:
+            lines.append(
+                f"  • {len(plan.remove_key)} worklog(s) will be removed "
+                "(block no longer has a Jira Issue Key)")
+        if plan.pending_deletes:
+            lines.append(
+                f"  • {len(plan.pending_deletes)} deleted block(s) will be "
+                "removed from Jira")
+        if plan.unchanged:
+            lines.append(
+                f"  • {len(plan.unchanged)} unchanged block(s) will be skipped")
+        if plan.skipped:
+            lines.append(
+                f"  • {len(plan.skipped)} block(s) skipped (no Jira Issue Key)")
+        if plan.too_short:
+            lines.append(
+                f"  • {len(plan.too_short)} block(s) shorter than 1 minute "
+                "cannot be logged")
         lines += [
             "",
-            "This only writes worklogs on those QDMs (started time, duration, "
-            "and the block’s notes as the comment).",
+            "Only real changes are sent (new blocks, edits, and deletions).",
             "It does not change ticket status, assignee, description, or anything else.",
         ]
         if not messagebox.askyesno("Push to Jira", "\n".join(lines), parent=self):
@@ -1299,7 +1427,8 @@ class MainWindow(tk.Tk):
             # Own connection: this thread can't use the window's sqlite conn.
             db = Database(self.db.path)
             try:
-                result = jira_sync.push_worklogs(db, creds, entries)
+                result = jira_sync.push_worklogs(
+                    db, creds, entries, start_date, end_date)
             except Exception as exc:
                 err = str(exc)
                 jira_client._log(f"push_worklogs failed: {exc}\n{traceback.format_exc()}")
@@ -1314,8 +1443,19 @@ class MainWindow(tk.Tk):
     def _on_jira_push_done(self, result: jira_sync.PushResult):
         self._set_jira_busy(False)
         self.calendar.refresh()
-        msg = (f"Logged {result.created} new worklog(s) to Jira"
-               f"{f', updated {result.updated}' if result.updated else ''}.")
+        parts = []
+        if result.created:
+            parts.append(f"logged {result.created} new worklog(s)")
+        if result.updated:
+            parts.append(f"updated {result.updated}")
+        if result.deleted:
+            parts.append(f"removed {result.deleted}")
+        if result.unchanged:
+            parts.append(f"skipped {result.unchanged} unchanged")
+        if parts:
+            msg = "Jira: " + ", ".join(parts) + "."
+        else:
+            msg = "Nothing was written to Jira."
         if result.skipped:
             msg += (f"\n\n{len(result.skipped)} block(s) skipped — no Jira Issue Key:\n" +
                     "\n".join(f"  • {e.activity_name} ({e.date} {e.start_time}–{e.end_time})"
@@ -1418,6 +1558,6 @@ class MainWindow(tk.Tk):
             if answer is None:
                 return
             if answer:
-                self.timer_bar.stop()
+                self.timer_bar.stop(prompt_notes=False)
         self.db.close()
         self.destroy()

@@ -90,6 +90,21 @@ def entries_today():
     return db.list_time_entries_for_week([date.today().isoformat()])
 
 
+def time_block_open():
+    try:
+        return str(win.notebook.tab(win.notebook.select(), "text")) == "Time Block"
+    except Exception:
+        return False
+
+
+def save_timer_description(text="from the timer"):
+    panel = win.timeblock_panel
+    panel.notes_text.delete("1.0", "end")
+    panel.notes_text.insert("1.0", text)
+    panel._save()
+    win.update()
+
+
 print("--- Timer bar exists and its activity picker is populated ---")
 check("MainWindow has a timer_bar", hasattr(win, "timer_bar"))
 tb = win.timer_bar
@@ -104,7 +119,7 @@ tb._start()
 check("A warning was shown", len(warnings) == 1)
 check("Timer did not start", not tb.is_running())
 
-print("\n--- Start -> Stop logs a rounded time block for today ---")
+print("\n--- Start -> Stop asks for a description before logging ---")
 tb.activity_var.set("Deep Work")
 tb.activity_combo.set("Deep Work")
 t0 = _Clock.now
@@ -122,6 +137,17 @@ win.update()
 
 check("Timer is idle again after Stop", not tb.is_running())
 check("Activity picker is unlocked again", str(tb.activity_combo.cget("state")) == "readonly")
+check("Time Block tab opened for a description", time_block_open())
+check("No time entry is saved until description is confirmed",
+      len(entries_today()) == before)
+panel = win.timeblock_panel
+check("Description is required on the Time Block tab", panel._require_notes)
+panel._save()
+win.update()
+check("Save without a description is blocked", len(entries_today()) == before)
+check("The form asks for a description",
+      "description" in panel.error_label.cget("text").lower())
+save_timer_description("hooked up the API")
 after = entries_today()
 check("Exactly one new time entry was logged", len(after) == before + 1)
 logged = next(e for e in after if e.start_time == hhmm(t0))
@@ -129,6 +155,7 @@ check(f"Logged entry is for the right activity (got {logged.activity_name!r})",
       logged.activity_name == "Deep Work")
 check(f"~47 elapsed minutes rounded to 45 (got {logged.start_time}-{logged.end_time})",
       logged.end_time == hhmm(t0 + timedelta(minutes=45)))
+check("The description was stored on the block", logged.notes == "hooked up the API")
 check("Status label shows what was logged", "Logged 45 min to Deep Work" in tb.status_label.cget("text"))
 today_week_start = date.today() - timedelta(days=date.today().weekday())
 check("Timer bar jumped the Timesheet calendar to today's week",
@@ -146,6 +173,22 @@ win.update()
 check("A genuinely 0-minute timer logs no entry", len(entries_today()) == before)
 check("Status label says nothing was logged", "nothing logged" in tb.status_label.cget("text"))
 
+print("\n--- Cancel on the description prompt discards the time ---")
+advance(60)
+tb.activity_var.set("Standup")
+tb.activity_combo.set("Standup")
+tb._start()
+advance(15)
+before = len(entries_today())
+tb._stop()
+win.update()
+check("Cancel path still opens Time Block first", time_block_open())
+win.timeblock_panel._cancel()
+win.update()
+check("Cancel does not log a time entry", len(entries_today()) == before)
+check("Cancel status says nothing was logged",
+      "nothing logged" in tb.status_label.cget("text"))
+
 print("\n--- A timer that ran only a moment still logs the 15-minute floor ---")
 advance(60)  # a clean gap before the next block
 t1 = _Clock.now
@@ -156,6 +199,7 @@ advance(1)  # a brief but nonzero moment -- still real elapsed time, unlike a li
 before = len(entries_today())
 tb._stop()
 win.update()
+save_timer_description("standup notes")
 after = entries_today()
 check("A near-instant timer still logs one entry (15-minute floor)", len(after) == before + 1)
 floor_entry = next(e for e in after if e.start_time == hhmm(t1))
@@ -185,6 +229,7 @@ advance(30)  # t2 -> t2+30, which overlaps [t2+20, t2+40)
 before = len(entries_today())
 tb._stop()
 win.update()
+save_timer_description("overlap notes")
 after = entries_today()
 check("Stopping into an overlapping slot still logs a new entry", len(after) == before + 1)
 check("No overlap prompt was shown (askyesno was never called)", len(askyesno_calls) == 0)
@@ -224,6 +269,7 @@ advance(15)  # another 15 minutes after resuming -> 30 total
 before = len(entries_today())
 tb2._stop()
 win.update()
+save_timer_description("resumed timer")
 after = entries_today()
 check("Stopping the resumed timer logs correctly", len(after) == before + 1)
 resumed_entry = next(e for e in after if e.start_time == hhmm(t3))

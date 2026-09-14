@@ -70,6 +70,39 @@ def format_day_total_hours(minutes: float) -> str:
     return f"{minutes / 60:.1f}h"
 
 
+def wrap_block_text(text: str, chars_per_line: int) -> List[str]:
+    """Word-wrap a one-line string so calendar blocks can show a long
+    QDM name / notes instead of cutting them off with an ellipsis."""
+    text = " ".join((text or "").split())
+    if not text:
+        return []
+    width = max(4, int(chars_per_line))
+    lines: List[str] = []
+    current = ""
+    for word in text.split(" "):
+        trial = word if not current else f"{current} {word}"
+        if len(trial) <= width:
+            current = trial
+            continue
+        if current:
+            lines.append(current)
+        while len(word) > width:
+            lines.append(word[:width])
+            word = word[width:]
+        current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _ellipsis(text: str, chars_per_line: int) -> str:
+    text = (text or "").strip()
+    width = max(4, int(chars_per_line))
+    if len(text) <= width:
+        return text
+    return text[: max(1, width - 1)].rstrip() + "…"
+
+
 class CalendarGrid(tk.Frame):
     # Cap on how many undo/redo steps are kept per grid instance -- enough
     # for any real editing session without the two stacks (each entry is a
@@ -294,11 +327,19 @@ class CalendarGrid(tk.Frame):
         # scrolls vertically; Shift+wheel scrolls horizontally, the
         # standard convention this app's target platforms already use for
         # a horizontally-scrolling view.
-        for widget in (self.canvas, self._scroll_host):
+        #
+        # Tk 9 (this app's current macOS/Homebrew Python) stopped turning
+        # two-finger trackpad swipes into <MouseWheel> at all -- they
+        # arrive as <TouchpadScroll> instead (TIP 684). The sidebar's
+        # ScrollArea already handles that; without the same bind here the
+        # grid's wheel bindings never fire and the calendar feels stuck.
+        wheel_targets = (self.canvas, self._scroll_host, self._vscroll, self._hscroll)
+        for widget in wheel_targets:
             widget.bind("<MouseWheel>", self._on_mousewheel)
             widget.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
             widget.bind("<Button-4>", self._on_mousewheel)
             widget.bind("<Button-5>", self._on_mousewheel)
+        self._bind_calendar_touchpad(wheel_targets)
 
         # Same column as _scroll_host (not packed under the scrollbar),
         # same coordinate space as the grid (gutter + i * day_width),
@@ -587,6 +628,84 @@ class CalendarGrid(tk.Frame):
             direction = -1 if event.delta > 0 else 1
         self._scroll_host.xview_scroll(direction, "units")
 
+    def _bind_calendar_touchpad(self, widgets):
+        """Tk 9+ <TouchpadScroll> (TIP 684). Same dual-path as ScrollArea:
+        bind_all + hit-test, plus a direct bind on the grid widgets in
+        case winfo_containing is wrong on Retina. Older Tk that doesn't
+        know the event name is a no-op."""
+        try:
+            self.bind_all("<TouchpadScroll>", self._on_touchpad_anywhere, add="+")
+        except tk.TclError:
+            return
+        for widget in widgets:
+            try:
+                widget.bind("<TouchpadScroll>", self._on_touchpad_direct, add="+")
+            except tk.TclError:
+                return
+
+    def _is_over_calendar(self, widget) -> bool:
+        w = widget
+        while w is not None:
+            if w in (self.canvas, self._scroll_host, self._vscroll, self._hscroll):
+                return True
+            w = getattr(w, "master", None)
+        return False
+
+    def _on_touchpad_anywhere(self, event):
+        try:
+            hovered = self.winfo_containing(event.x_root, event.y_root)
+        except (KeyError, tk.TclError):
+            return
+        if not self._is_over_calendar(hovered):
+            return
+        self._scroll_touchpad(event)
+
+    def _on_touchpad_direct(self, event):
+        self._scroll_touchpad(event)
+
+    def _scroll_touchpad(self, event):
+        """Pixel-precise two-finger scroll of the grid (Tk 9 TouchpadScroll)."""
+        try:
+            dx_str, dy_str = self.tk.splitlist(
+                self.tk.call("tk::PreciseScrollDeltas", event.delta)
+            )
+            dx, dy = int(dx_str), int(dy_str)
+        except (tk.TclError, ValueError, AttributeError, TypeError):
+            return
+        if dy:
+            self._nudge_scroll_pixels("y", dy)
+        if dx:
+            self._nudge_scroll_pixels("x", dx)
+
+    def _nudge_scroll_pixels(self, axis: str, delta: int):
+        # Sign matches ScrollArea: a negative delta moves the view down/right.
+        # macOS natural scrolling already inverted the hardware signal.
+        try:
+            region = str(self._scroll_host.cget("scrollregion")).split()
+            x0, y0, x1, y1 = (float(v) for v in region)
+        except (tk.TclError, ValueError):
+            return
+        if axis == "y":
+            content = y1 - y0
+            if content <= 0:
+                return
+            try:
+                current = self._scroll_host.yview()[0] * content
+            except tk.TclError:
+                return
+            new = max(0.0, min(current - delta, content))
+            self._scroll_host.yview_moveto(new / content)
+            return
+        content = x1 - x0
+        if content <= 0:
+            return
+        try:
+            current = self._scroll_host.xview()[0] * content
+        except tk.TclError:
+            return
+        new = max(0.0, min(current - delta, content))
+        self._scroll_host.xview_moveto(new / content)
+
     # ------------------------------------------------------------------
     # Week navigation (normal mode only)
     # ------------------------------------------------------------------
@@ -690,7 +809,8 @@ class CalendarGrid(tk.Frame):
 
     def _make_entry(self, entry_id, activity_id, activity_name, jira_key, color, day_idx,
                      start_time, end_time, notes, jira_project, issue_type,
-                     jira_worklog_id=None) -> EntryLike:
+                     jira_worklog_id=None, jira_worklog_issue=None,
+                     jira_worklog_fingerprint=None) -> EntryLike:
         if self.template_mode:
             return TemplateEntry(
                 entry_id, activity_id, activity_name, jira_key, color, day_idx,
@@ -701,6 +821,8 @@ class CalendarGrid(tk.Frame):
             self.day_date(day_idx).isoformat(), start_time, end_time, notes,
             jira_project=jira_project, issue_type=issue_type,
             jira_worklog_id=jira_worklog_id,
+            jira_worklog_issue=jira_worklog_issue,
+            jira_worklog_fingerprint=jira_worklog_fingerprint,
         )
 
     def _db_list_entries(self) -> List[EntryLike]:
@@ -762,6 +884,8 @@ class CalendarGrid(tk.Frame):
             "notes": entry.notes, "jira_project": entry.jira_project,
             "issue_type": entry.issue_type,
             "jira_worklog_id": getattr(entry, "jira_worklog_id", None),
+            "jira_worklog_issue": getattr(entry, "jira_worklog_issue", None),
+            "jira_worklog_fingerprint": getattr(entry, "jira_worklog_fingerprint", None),
         }
 
     def _entry_from_fields(self, fields: dict) -> EntryLike:
@@ -770,6 +894,8 @@ class CalendarGrid(tk.Frame):
             fields["color"], fields["day_idx"], fields["start_time"], fields["end_time"],
             fields["notes"], fields["jira_project"], fields["issue_type"],
             jira_worklog_id=fields.get("jira_worklog_id"),
+            jira_worklog_issue=fields.get("jira_worklog_issue"),
+            jira_worklog_fingerprint=fields.get("jira_worklog_fingerprint"),
         )
 
     def _apply_fields_to_entry(self, entry: EntryLike, fields: dict):
@@ -791,6 +917,8 @@ class CalendarGrid(tk.Frame):
         if not self.template_mode:
             assert isinstance(entry, TimeEntry)
             entry.jira_worklog_id = fields.get("jira_worklog_id")
+            entry.jira_worklog_issue = fields.get("jira_worklog_issue")
+            entry.jira_worklog_fingerprint = fields.get("jira_worklog_fingerprint")
 
     def _push_undo(self, command: dict):
         self._undo_stack.append(command)
@@ -891,6 +1019,7 @@ class CalendarGrid(tk.Frame):
         """Redraw the whole grid + entries from the database."""
         c = self.canvas
         c.delete("all")
+        c._aa_images = []
 
         if self.template_mode:
             self.week_label.config(text="Recurring Weekly Template")
@@ -1134,41 +1263,69 @@ class CalendarGrid(tk.Frame):
         y1 = self.header_height + _hhmm_to_minute(entry.end_time) * self.px_per_min
         return x0, y0, x1, y1
 
+    _PREVIEW_CORNER_STEPS = max(18, int(config.BLOCK_CORNER_RADIUS * 2.5))
+
+    def _set_live_block(self, state, key, x0, y0, x1, y1, *, fill, outline, width=1):
+        """Rounded live preview that can be reshaped every motion event.
+
+        A PhotoImage per pixel hitchs; a dashed `create_rectangle` is what
+        made stretched blocks look pixelated while you set duration.
+        """
+        radius = min(config.BLOCK_CORNER_RADIUS, max(0.0, (x1 - x0) / 2), max(0.0, (y1 - y0) / 2))
+        points = theme.rounded_rect_points(
+            x0, y0, x1, y1, radius=radius, steps=self._PREVIEW_CORNER_STEPS)
+        item = state.get(key)
+        if item is None:
+            state[key] = self.canvas.create_polygon(
+                points, fill=fill, outline=outline, width=width, joinstyle="round")
+        else:
+            self.canvas.coords(item, *points)
+
     def _entry_text_lines(self, entry: EntryLike, x0, y0, x1, y1):
-        """Pick which lines (name / notes / time) fit inside the block's
-        pixel height, prioritizing notes over the time range so the user
-        can tell activities apart at a glance."""
-        avail_w = max(10, x1 - x0 - 18)
+        """Fit name / notes / time inside the block, wrapping long text
+        onto extra lines when the block is tall enough. Notes still beat
+        the time range when space is tight, so two blocks of the same
+        QDM stay distinguishable."""
+        avail_w = max(10, x1 - x0 - 16)
         avail_h = max(8, y1 - y0 - 8)
-        chars_per_line = max(6, int(avail_w / 5.6))
+        chars_per_line = max(6, int(avail_w / 6.0))
         line_pitch = 14
         max_lines = max(1, int(avail_h // line_pitch))
 
-        def truncate(s, n):
-            s = s.strip()
-            if len(s) <= n:
-                return s
-            return s[: max(1, n - 1)].rstrip() + "…"
-
-        name_line = entry.activity_name
+        name = (entry.activity_name or "").strip()
         if entry.jira_key:
-            name_line += f"  ·  {entry.jira_key}"
-        lines = [(truncate(name_line, chars_per_line), True)]
-
-        notes_oneline = " ".join(entry.notes.split()) if entry.notes else ""
+            name = f"{name}  ·  {entry.jira_key}" if name else entry.jira_key.strip()
+        name_parts = wrap_block_text(name, chars_per_line)
+        notes_parts = wrap_block_text(
+            " ".join(entry.notes.split()) if entry.notes else "", chars_per_line)
         time_line = f"{entry.start_time}–{entry.end_time}"
-        candidates = []
-        if notes_oneline:
-            candidates.append(truncate(notes_oneline, chars_per_line))
-        candidates.append(time_line)
-        for cand in candidates:
-            if len(lines) >= max_lines:
+
+        chosen: List[Tuple[str, bool]] = []
+        remaining = max_lines
+        for i, part in enumerate(name_parts):
+            if remaining <= 0:
                 break
-            lines.append((cand, False))
+            if remaining == 1 and i < len(name_parts) - 1:
+                chosen.append((_ellipsis(part, chars_per_line), True))
+                remaining = 0
+                break
+            chosen.append((part, True))
+            remaining -= 1
+        for i, part in enumerate(notes_parts):
+            if remaining <= 0:
+                break
+            if remaining == 1 and i < len(notes_parts) - 1:
+                chosen.append((_ellipsis(part, chars_per_line), False))
+                remaining = 0
+                break
+            chosen.append((part, False))
+            remaining -= 1
+        if remaining > 0:
+            chosen.append((time_line, False))
 
         result = []
         ty = y0 + 4
-        for text, bold in lines:
+        for text, bold in chosen:
             result.append((text, bold, ty))
             ty += line_pitch
         return result
@@ -1186,18 +1343,13 @@ class CalendarGrid(tk.Frame):
         ids = theme.place_rounded_rect(
             self.canvas, x0, y0, x1, y1, radius=config.BLOCK_CORNER_RADIUS,
             fill=entry.color, outline=outline_color, width=outline_width,
-            background=theme.GRID_BG, tags=("entry", tag),
+            background=theme.GRID_BG, tags=("entry", tag), full=True,
         )
         rect = ids[-1]
-        stripe = theme.darken(entry.color, 0.22)
-        theme.place_rounded_rect(
-            self.canvas, x0, y0, min(x0 + 5, x1), y1, radius=min(4, config.BLOCK_CORNER_RADIUS),
-            fill=stripe, outline="", background=entry.color, tags=("entry", tag),
-        )
         text_color = theme.block_text_color(entry.color)
         for text, is_bold, ty in self._entry_text_lines(entry, x0, y0, x1, y1):
             item = self.canvas.create_text(
-                x0 + 10, ty, text=text, anchor="nw",
+                x0 + 8, ty, text=text, anchor="nw",
                 font=(self.family, 9 if is_bold else 8, "bold" if is_bold else "normal"),
                 fill=text_color, tags=("entry_text", tag),
             )
@@ -1364,33 +1516,26 @@ class CalendarGrid(tk.Frame):
         y0 = self.header_height + start_min * self.px_per_min
         y1 = self.header_height + end_min * self.px_per_min
 
-        if state["preview_rect"] is None:
-            state["preview_rect"] = self.canvas.create_rectangle(
-                x0, y0, x1, y1, fill=theme.PREVIEW_FILL, outline=theme.PREVIEW_OUTLINE,
-                width=1, stipple="gray25",
-            )
-        else:
-            self.canvas.coords(state["preview_rect"], x0, y0, x1, y1)
+        self._set_live_block(
+            state, "preview_rect", x0, y0, x1, y1,
+            fill=theme.PREVIEW_FILL, outline=theme.PREVIEW_OUTLINE)
 
     def _update_entry_drag_preview(self, event, state: dict):
         entry = state["orig_entry"]
 
         if "drag_rect_id" not in state:
             # First confirmed-drag frame: swap the settled (rounded) entry
-            # items for a lightweight rectangle we can cheaply reposition
-            # every motion event. The real rounded item is restored by the
-            # refresh() that always runs at the end of the drag.
+            # items for a live rounded polygon we can reshape every motion
+            # event. The real AA image is restored by the refresh() that
+            # always runs at the end of the drag.
             for item in self.canvas.find_withtag(f"entry_{state['entry_id']}"):
                 self.canvas.delete(item)
-            state["drag_rect_id"] = self.canvas.create_rectangle(
-                0, 0, 0, 0, fill=entry.color, outline=theme.PANEL_BG, width=2, dash=(4, 2),
-            )
+            state["drag_rect_id"] = None
             state["drag_text_id"] = self.canvas.create_text(
                 0, 0, text="", anchor="nw", fill=theme.block_text_color(entry.color),
                 font=(self.family, 8, "bold"), justify="left",
             )
 
-        rect_id = state["drag_rect_id"]
         text_id = state["drag_text_id"]
         duration = state["end_minute"] - state["start_minute"]
 
@@ -1423,7 +1568,10 @@ class CalendarGrid(tk.Frame):
         x1 = x0 + self.day_width - 6
         y0 = self.header_height + new_start * self.px_per_min
         y1 = self.header_height + new_end * self.px_per_min
-        self.canvas.coords(rect_id, x0, y0, x1, y1)
+        self._set_live_block(
+            state, "drag_rect_id", x0, y0, x1, y1,
+            fill=entry.color, outline=theme.PANEL_BG, width=2)
+        rect_id = state["drag_rect_id"]
 
         label = entry.activity_name
         if entry.jira_key:
@@ -1468,7 +1616,8 @@ class CalendarGrid(tk.Frame):
                 end_min = min(_minutes_total(), start_min + config.SLOT_MINUTES)
                 self._open_entry_dialog(new=True, day_idx=day_idx,
                                          start_hhmm=_minute_to_hhmm(start_min),
-                                         end_hhmm=_minute_to_hhmm(end_min))
+                                         end_hhmm=_minute_to_hhmm(end_min),
+                                         require_notes=True)
                 return
 
         start_min = min(state["anchor_minute"], state["cur_minute"])
@@ -1481,7 +1630,8 @@ class CalendarGrid(tk.Frame):
             return
         self._open_entry_dialog(new=True, day_idx=day_idx,
                                  start_hhmm=_minute_to_hhmm(start_min),
-                                 end_hhmm=_minute_to_hhmm(end_min))
+                                 end_hhmm=_minute_to_hhmm(end_min),
+                                 require_notes=True)
 
     def begin_qdm_drop(self, activity: Activity, _event=None):
         """Start a drag from the QDM list onto this grid."""
@@ -1583,12 +1733,9 @@ class CalendarGrid(tk.Frame):
         y0 = self.header_height + start_min * self.px_per_min
         y1 = self.header_height + end_min * self.px_per_min
         act = state["activity"]
-        if state["preview_rect"] is None:
-            state["preview_rect"] = self.canvas.create_rectangle(
-                x0, y0, x1, y1, fill=act.color, outline=theme.PANEL_BG, width=2, dash=(4, 2),
-            )
-        else:
-            self.canvas.coords(state["preview_rect"], x0, y0, x1, y1)
+        self._set_live_block(
+            state, "preview_rect", x0, y0, x1, y1,
+            fill=act.color, outline=theme.PANEL_BG, width=2)
         state["preview_start"] = start_min
         state["preview_end"] = end_min
         state["preview_day_idx"] = day_idx
@@ -1621,17 +1768,17 @@ class CalendarGrid(tk.Frame):
             end_min = min(_minutes_total(), start_min + config.QDM_DROP_MINUTES)
         if end_min <= start_min:
             return
-        entry = self._make_entry(
-            None, activity.id, activity.name, activity.jira_key, activity.color, day_idx,
-            _minute_to_hhmm(start_min), _minute_to_hhmm(end_min), "",
-            activity.jira_project, activity.issue_type,
+        # Duration is already chosen on the grid. Jira worklogs need a
+        # comment, so open the Time Block tab on Notes instead of saving
+        # an empty description. Cancel leaves no block.
+        self._open_entry_dialog(
+            new=True, day_idx=day_idx,
+            start_hhmm=_minute_to_hhmm(start_min),
+            end_hhmm=_minute_to_hhmm(end_min),
+            placed_activity=activity,
+            require_notes=True,
         )
-        new_id = self._db_add_entry(entry)
-        self._push_undo({"kind": "add", "items": [
-            {"id": new_id, "fields": self._snapshot(entry, day_idx)}]})
-        self.selected_entry_id = new_id
         self.clear_armed_activity()
-        self.refresh()
 
     def _finish_entry_drag(self, state):
         entry = state["orig_entry"]
@@ -1846,9 +1993,14 @@ class CalendarGrid(tk.Frame):
     # ------------------------------------------------------------------
     def _open_entry_dialog(self, new: bool, day_idx: Optional[int] = None,
                             start_hhmm: Optional[str] = None, end_hhmm: Optional[str] = None,
-                            existing: Optional[EntryLike] = None):
+                            existing: Optional[EntryLike] = None,
+                            placed_activity: Optional[Activity] = None,
+                            require_notes: bool = False,
+                            force_date: Optional[str] = None,
+                            on_committed: Optional[Callable] = None,
+                            on_cancelled: Optional[Callable] = None):
         activities = self.db.list_activities()
-        armed = self.get_armed_activity() if new else None
+        armed = placed_activity or (self.get_armed_activity() if new else None)
 
         def on_save(result):
             target_day_idx = result["day_idx"]
@@ -1858,10 +2010,13 @@ class CalendarGrid(tk.Frame):
                     result["color"], target_day_idx, result["start_time"], result["end_time"],
                     result["notes"], result["jira_project"], result["issue_type"],
                 )
+                if force_date and isinstance(entry, TimeEntry):
+                    entry.date = force_date
                 new_id = self._db_add_entry(entry)
                 self._push_undo({"kind": "add", "items": [
                     {"id": new_id, "fields": self._snapshot(entry, target_day_idx)}]})
                 self.selected_entry_id = new_id
+                committed = entry
             else:
                 assert existing is not None
                 before = self._snapshot(existing, self._entry_day_idx(existing))
@@ -1884,7 +2039,10 @@ class CalendarGrid(tk.Frame):
                 after = self._snapshot(existing, target_day_idx)
                 self._push_undo({"kind": "update", "id": existing.id, "before": before, "after": after})
                 self.selected_entry_id = existing.id
+                committed = existing
             self.refresh()
+            if on_committed:
+                on_committed(committed)
             return True
 
         def on_delete():
@@ -1909,4 +2067,6 @@ class CalendarGrid(tk.Frame):
             start_hour=config.START_HOUR, end_hour=config.END_HOUR,
             slot_minutes=config.SLOT_MINUTES,
             is_new=new,
+            require_notes=require_notes,
+            on_cancel=on_cancelled,
         )

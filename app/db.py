@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import List, Optional, Tuple
 
 from . import config
-from .models import Activity, Project, TemplateEntry, TimeEntry
+from .models import Activity, PendingWorklogDelete, Project, TemplateEntry, TimeEntry
 
 # NOTE ON NAMING -- this schema has been renamed twice:
 #   1. Originally "Activities" (leaf items) grouped into "Activity Folders".
@@ -65,7 +65,17 @@ CREATE TABLE IF NOT EXISTS time_entries (
     jira_project    TEXT,
     issue_type      TEXT,
     jira_worklog_id TEXT,
+    jira_worklog_issue TEXT,
+    jira_worklog_fingerprint TEXT,
     FOREIGN KEY (activity_id) REFERENCES activities(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS pending_worklog_deletes (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    jira_key        TEXT NOT NULL,
+    jira_worklog_id TEXT NOT NULL UNIQUE,
+    date            TEXT NOT NULL,
+    created_at      TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -116,6 +126,8 @@ _MIGRATIONS = {
         ("jira_project", "TEXT"),
         ("issue_type", "TEXT"),
         ("jira_worklog_id", "TEXT"),
+        ("jira_worklog_issue", "TEXT"),
+        ("jira_worklog_fingerprint", "TEXT"),
     ],
     "template_entries": [
         ("jira_project", "TEXT"),
@@ -576,10 +588,31 @@ class Database:
         return None
 
     def set_time_entry_worklog_id(self, entry_id: int, worklog_id: Optional[str]):
+        """Keep the Jira worklog id on a row without treating it as synced.
+
+        Tests (and older callers) use this to attach an id. The next push
+        still sends that worklog unless mark_time_entry_worklog_synced has
+        stored a matching fingerprint.
+        """
         with self._cursor() as cur:
             cur.execute(
                 "UPDATE time_entries SET jira_worklog_id=?, updated_at=? WHERE id=?",
                 (worklog_id, _now(), entry_id),
+            )
+
+    def mark_time_entry_worklog_synced(
+        self, entry_id: int, worklog_id: Optional[str],
+        issue_key: Optional[str] = None,
+        fingerprint: Optional[str] = None,
+    ):
+        """Record what was last successfully written to Jira for this block."""
+        with self._cursor() as cur:
+            cur.execute(
+                """UPDATE time_entries
+                   SET jira_worklog_id=?, jira_worklog_issue=?,
+                       jira_worklog_fingerprint=?
+                   WHERE id=?""",
+                (worklog_id, issue_key, fingerprint, entry_id),
             )
 
     def get_project(self, project_id: int) -> Optional[Project]:
@@ -677,6 +710,13 @@ class Database:
             )
 
     def delete_activity(self, activity_id: int, delete_entries: bool = False):
+        if delete_entries:
+            with self._cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM time_entries WHERE activity_id=?", (activity_id,))
+                rows = cur.fetchall()
+            for r in rows:
+                self.queue_pending_worklog_delete(self._row_to_entry(r))
         with self._cursor() as cur:
             if delete_entries:
                 cur.execute("DELETE FROM time_entries WHERE activity_id=?", (activity_id,))
@@ -735,15 +775,18 @@ class Database:
                 """INSERT INTO time_entries
                    (activity_id, activity_name, jira_key, color, date,
                     start_time, end_time, notes, created_at, updated_at,
-                    jira_project, issue_type, jira_worklog_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    jira_project, issue_type, jira_worklog_id,
+                    jira_worklog_issue, jira_worklog_fingerprint)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (e.activity_id, e.activity_name, e.jira_key, e.color, e.date,
                  e.start_time, e.end_time, e.notes, now, now, e.jira_project, e.issue_type,
-                 e.jira_worklog_id),
+                 e.jira_worklog_id, e.jira_worklog_issue, e.jira_worklog_fingerprint),
             )
             lastrowid = cur.lastrowid
             assert lastrowid is not None
-            return lastrowid
+        if e.jira_worklog_id:
+            self.cancel_pending_worklog_delete(e.jira_worklog_id)
+        return lastrowid
 
     def update_time_entry(self, e: TimeEntry):
         if e.id is None:
@@ -761,8 +804,62 @@ class Database:
             )
 
     def delete_time_entry(self, entry_id: int):
+        entry = self.get_time_entry(entry_id)
+        if entry is not None:
+            self.queue_pending_worklog_delete(entry)
         with self._cursor() as cur:
             cur.execute("DELETE FROM time_entries WHERE id=?", (entry_id,))
+
+    def queue_pending_worklog_delete(self, entry: TimeEntry):
+        """Remember a pushed worklog so the next Push to Jira can DELETE it."""
+        worklog_id = (entry.jira_worklog_id or "").strip()
+        key = ((entry.jira_worklog_issue or entry.jira_key or "")).strip()
+        if not worklog_id or not key:
+            return
+        with self._cursor() as cur:
+            cur.execute(
+                """INSERT OR IGNORE INTO pending_worklog_deletes
+                   (jira_key, jira_worklog_id, date, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                (key, worklog_id, entry.date, _now()),
+            )
+
+    def cancel_pending_worklog_delete(self, worklog_id: str):
+        needle = (worklog_id or "").strip()
+        if not needle:
+            return
+        with self._cursor() as cur:
+            cur.execute(
+                "DELETE FROM pending_worklog_deletes WHERE jira_worklog_id=?",
+                (needle,),
+            )
+
+    def remove_pending_worklog_delete(self, pending_id: int):
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM pending_worklog_deletes WHERE id=?", (pending_id,))
+
+    def list_pending_worklog_deletes(
+        self, start_date: Optional[str] = None, end_date: Optional[str] = None,
+    ) -> List[PendingWorklogDelete]:
+        with self._cursor() as cur:
+            if start_date and end_date:
+                cur.execute(
+                    "SELECT * FROM pending_worklog_deletes "
+                    "WHERE date BETWEEN ? AND ? ORDER BY date, id",
+                    (start_date, end_date),
+                )
+            else:
+                cur.execute(
+                    "SELECT * FROM pending_worklog_deletes ORDER BY date, id")
+            rows = cur.fetchall()
+        return [self._row_to_pending_worklog_delete(r) for r in rows]
+
+    @staticmethod
+    def _row_to_pending_worklog_delete(r) -> PendingWorklogDelete:
+        return PendingWorklogDelete(
+            id=r["id"], jira_key=r["jira_key"],
+            jira_worklog_id=r["jira_worklog_id"], date=r["date"],
+        )
 
     def get_time_entry(self, entry_id: int) -> Optional[TimeEntry]:
         with self._cursor() as cur:
@@ -843,6 +940,11 @@ class Database:
             start_time=r["start_time"], end_time=r["end_time"], notes=r["notes"],
             jira_project=r["jira_project"], issue_type=r["issue_type"],
             jira_worklog_id=r["jira_worklog_id"] if "jira_worklog_id" in r.keys() else None,
+            jira_worklog_issue=(
+                r["jira_worklog_issue"] if "jira_worklog_issue" in r.keys() else None),
+            jira_worklog_fingerprint=(
+                r["jira_worklog_fingerprint"] if "jira_worklog_fingerprint" in r.keys()
+                else None),
         )
 
     # ------------------------------------------------------------------

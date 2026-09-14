@@ -463,3 +463,91 @@ def update_worklog(creds: JiraCredentials, issue_key: str, worklog_id: str,
             f"/worklog/{urllib.parse.quote(str(worklog_id))}")
     payload = _request(creds, "PUT", path, body=body)
     return str(payload.get("id") or worklog_id)
+
+
+def delete_worklog(creds: JiraCredentials, issue_key: str, worklog_id: str) -> None:
+    path = (f"/rest/api/2/issue/{urllib.parse.quote(issue_key)}"
+            f"/worklog/{urllib.parse.quote(str(worklog_id))}")
+    _request(creds, "DELETE", path)
+
+
+@dataclass
+class JiraTransition:
+    """One workflow button Jira will currently allow on an issue."""
+    id: str
+    name: str
+    to_name: str = ""
+    to_category: Optional[str] = None
+
+    def label(self) -> str:
+        dest = (self.to_name or self.name or "").strip()
+        action = (self.name or "").strip()
+        if dest and action and dest.lower() != action.lower():
+            return f"{action} → {dest}"
+        return dest or action
+
+    def closes_ticket(self) -> bool:
+        category = (self.to_category or "").strip().lower()
+        if category == "done":
+            return True
+        name = (self.to_name or self.name or "").strip().lower()
+        return name in {
+            "done", "closed", "resolved", "complete", "completed",
+            "work completed", "won't do", "cancelled", "canceled",
+        }
+
+
+def parse_transitions(payload: Any) -> List[JiraTransition]:
+    if not isinstance(payload, dict):
+        return []
+    out: List[JiraTransition] = []
+    for raw in payload.get("transitions") or []:
+        if not isinstance(raw, dict):
+            continue
+        trans_id = str(raw.get("id") or "").strip()
+        if not trans_id:
+            continue
+        dest = raw.get("to") or {}
+        cat = dest.get("statusCategory") or {}
+        to_category = (cat.get("key") or cat.get("name") or "").strip().lower() or None
+        out.append(JiraTransition(
+            id=trans_id,
+            name=(raw.get("name") or "").strip(),
+            to_name=(dest.get("name") or "").strip(),
+            to_category=to_category,
+        ))
+    return out
+
+
+def preferred_close_transition(transitions: List[JiraTransition]) -> Optional[JiraTransition]:
+    """Work Completed first, then any Done-category status."""
+    for trans in transitions:
+        if (trans.to_name or trans.name).strip().lower() == "work completed":
+            return trans
+    for trans in transitions:
+        if trans.closes_ticket():
+            return trans
+    return None
+
+
+def list_transitions(creds: JiraCredentials, issue_key: str) -> List[JiraTransition]:
+    key = (issue_key or "").strip()
+    if not key:
+        return []
+    payload = _request(
+        creds, "GET",
+        f"/rest/api/2/issue/{urllib.parse.quote(key)}/transitions",
+    )
+    return parse_transitions(payload)
+
+
+def transition_issue(creds: JiraCredentials, issue_key: str, transition_id: str) -> None:
+    key = (issue_key or "").strip()
+    trans_id = str(transition_id or "").strip()
+    if not key or not trans_id:
+        raise JiraError("Missing issue key or status transition.")
+    _request(
+        creds, "POST",
+        f"/rest/api/2/issue/{urllib.parse.quote(key)}/transitions",
+        body={"transition": {"id": trans_id}},
+    )

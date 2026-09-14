@@ -1,8 +1,9 @@
 """Header timer bar: pick an activity, click Start, and it counts up in
-real time; click Stop and it logs a time block for *today* automatically,
-with its duration rounded to the nearest 15 minutes. This is the fast path
-for "what am I doing right now" -- no dragging on the grid, no picking
-exact start/end times by hand.
+real time; click Stop and it opens the Time Block tab so you can add a
+description (Jira worklog comment) before the hours are saved, rounded to
+the nearest 15 minutes. Cancel on that tab discards the time. This is the
+fast path for "what am I doing right now" -- no dragging on the grid, no
+picking exact start/end times by hand.
 
 Lives in the top toolbar (see MainWindow._build_top_bar) rather than
 either sidebar, because it always logs against today's real date
@@ -25,18 +26,22 @@ from .widgets import RoundedButton, RoundedCombobox
 class TimerBar(tk.Frame):
     def __init__(self, master, db: Database, get_activities: Callable[[], List[Activity]],
                  on_saved: Callable[[TimeEntry], None], family: str,
-                 initial_state: Optional[dict] = None, **kwargs):
+                 initial_state: Optional[dict] = None,
+                 status_widget: Optional[tk.Label] = None,
+                 on_need_notes: Optional[Callable] = None, **kwargs):
         bg = kwargs.pop("bg", None) or theme.PANEL_BG
         kwargs.setdefault("bg", bg)
         super().__init__(master, **kwargs)
         self.db = db
         self.get_activities = get_activities
         self.on_saved = on_saved
+        self.on_need_notes = on_need_notes
         self.family = family
         self._activities: List[Activity] = []
         self._activities_by_name = {}
         self.start_dt: Optional[datetime] = None
         self._tick_job: Optional[str] = None
+        self._status_clear_job: Optional[str] = None
 
         inner = tk.Frame(self, bg=bg)
         inner.pack(fill="x")
@@ -46,8 +51,11 @@ class TimerBar(tk.Frame):
                                                state="readonly", width=22, bg=bg)
         self.activity_combo.pack(side="left", padx=(0, 8))
 
+        # Fixed character width so Start Timer / Stop Timer don't nudge
+        # the picker when the label swaps (this whole cluster is packed
+        # to the right of the header).
         self.toggle_btn = RoundedButton(inner, text="Start Timer", style="Accent.TButton",
-                                         command=self._toggle, bg=bg)
+                                         command=self._toggle, bg=bg, width=11)
         self.toggle_btn.pack(side="left")
 
         # A small drawn dot rather than a colored emoji/glyph for the
@@ -62,9 +70,13 @@ class TimerBar(tk.Frame):
                                        anchor="w")
         self.elapsed_label.pack(side="left")
 
-        self.status_label = tk.Label(inner, text="", font=(self.family, 9),
-                                      bg=bg, fg=theme.TEXT_SECONDARY)
-        self.status_label.pack(side="left", padx=(8, 0))
+        # Confirmation text lives in the header gap (see MainWindow.
+        # _build_top_bar), not in this cluster -- packing it here grew the
+        # right-aligned bar leftward and shoved the picker. An unmapped
+        # fallback keeps unit/smoke tests that read .status_label working
+        # when no header label is passed in.
+        self.status_label = status_widget or tk.Label(
+            inner, text="", font=(self.family, 9), bg=bg, fg=theme.TEXT_SECONDARY)
 
         self.refresh_activities()
 
@@ -124,24 +136,26 @@ class TimerBar(tk.Frame):
         else:
             self._start()
 
-    def stop(self):
+    def stop(self, *, prompt_notes: bool = True):
         """Public entry point for stopping the timer from outside this
         widget (e.g. MainWindow._on_close asking to log time-so-far before
-        the app exits)."""
+        the app exits). `prompt_notes=False` saves immediately with empty
+        notes — used on quit so the window can close without opening the
+        Time Block tab."""
         if self.is_running():
-            self._stop()
+            self._stop(prompt_notes=prompt_notes)
 
     def _start(self):
         if self._selected_activity() is None:
             messagebox.showwarning("Choose an activity", "Pick an activity before starting the timer.")
             return
-        self.status_label.config(text="")
+        self._set_status("")
         self.start_dt = datetime.now()
         self.activity_combo.config(state="disabled")
         self._render_running()
         self._tick()
 
-    def _stop(self):
+    def _stop(self, prompt_notes: bool = True):
         assert self.start_dt is not None
         start_dt = self.start_dt
         end_dt = datetime.now()
@@ -157,22 +171,38 @@ class TimerBar(tk.Frame):
         elapsed_minutes = (end_dt - start_dt).total_seconds() / 60
         duration = round_duration_minutes(elapsed_minutes)
         if act is None or duration <= 0:
-            self.status_label.config(text="Timer stopped -- nothing logged.")
+            self._set_status("Timer stopped — nothing logged.")
             return
 
         date_str = start_dt.date().isoformat()
         start_str = start_dt.strftime("%H:%M")
         end_str = (start_dt + timedelta(minutes=duration)).strftime("%H:%M")
 
-        # Overlapping an existing block is fine -- the calendar renders
-        # overlapping blocks side by side rather than rejecting them (see
-        # CalendarGrid._layout_day_entries), so there's no need to ask
-        # first here either.
+        # Same rule as dropping a QDM on the grid: Jira worklogs need a
+        # comment, so don't save an empty description. Closing the app
+        # still logs immediately so quit isn't blocked on the Time Block tab.
+        if prompt_notes and self.on_need_notes is not None:
+            self._set_status("Add a description to finish logging.", clear_after_ms=0)
+            self.on_need_notes(act, date_str, start_str, end_str)
+            return
+
         entry = TimeEntry(None, act.id, act.name, act.jira_key, act.color, date_str,
                            start_str, end_str, "", act.jira_project, act.issue_type)
         self.db.add_time_entry(entry)
-        self.status_label.config(text=f"Logged {duration} min to {act.name}.")
+        self._set_status(f"Logged {duration} min to {act.name}.")
         self.on_saved(entry)
+
+    def _set_status(self, text: str, clear_after_ms: int = 8000):
+        if self._status_clear_job is not None:
+            self.after_cancel(self._status_clear_job)
+            self._status_clear_job = None
+        self.status_label.config(text=text or "")
+        if text and clear_after_ms:
+            self._status_clear_job = self.after(clear_after_ms, self._clear_status)
+
+    def _clear_status(self):
+        self._status_clear_job = None
+        self.status_label.config(text="")
 
     # ------------------------------------------------------------------
     def _render_idle(self):
