@@ -383,7 +383,7 @@ class RoundedCombobox(tk.Frame):
         self._height = int(self._tkfont.metrics("linespace") + 2 * pad_y)
         self._min_width = int(self._char_width * self._tkfont.measure("0") + 40)
 
-        self._canvas = tk.Canvas(self, bg=bg, highlightthickness=0, cursor="hand2",
+        self._canvas = tk.Canvas(self, bg=bg, highlightthickness=0,
                                   width=self._min_width, height=self._height)
         self._canvas.pack(fill="both", expand=True)
         super().configure(width=self._min_width, height=self._height, takefocus=1)
@@ -400,6 +400,13 @@ class RoundedCombobox(tk.Frame):
         # Close the popup on outside clicks without unbind_all, which
         # would strip unrelated Button-1 handlers across the app.
         self.bind_all("<Button-1>", self._on_any_click, add="+")
+        self.bind_all("<MouseWheel>", self._on_popup_wheel, add="+")
+        self.bind_all("<Button-4>", self._on_popup_wheel, add="+")
+        self.bind_all("<Button-5>", self._on_popup_wheel, add="+")
+        try:
+            self.bind_all("<TouchpadScroll>", self._on_popup_touchpad, add="+")
+        except tk.TclError:
+            pass
 
         self._redraw()
 
@@ -513,53 +520,46 @@ class RoundedCombobox(tk.Frame):
         self.update_idletasks()
         root = self.winfo_toplevel()
 
-        # Long QDM names must not clip to the field's character width.
-        text_w = max((self._tkfont.measure(str(v)) for v in self._values), default=0) + 48
+        # Size to the longest QDM name, then hang the menu off the field's
+        # *right* edge so a picker in the top-right toolbar grows left
+        # into the window instead of clipping to the remaining 8px of
+        # margin (which is why names were ending in "…").
+        text_w = max((self._tkfont.measure(str(v)) for v in self._values), default=0) + 36
         field_w = max(int(self.winfo_width()), self._min_width)
-        max_w = 560
         try:
-            rw = root.winfo_width()
-            if rw > 100:
-                max_w = max(220, rw - 24)
+            max_w = max(220, int(root.winfo_width()) - 24)
         except tk.TclError:
-            pass
+            max_w = 560
         width = min(max(field_w, text_w), max_w)
 
-        rows_vis = min(max(len(self._values), 1), 8)
+        rows_vis = min(max(len(self._values), 1), 10)
         row_h = int(self._tkfont.metrics("linespace") + 12)
         self._popup_row_h = row_h
         height = rows_vis * row_h + 8
 
-        x = self.winfo_rootx()
-        y = self.winfo_rooty() + self.winfo_height() + 4
-        try:
-            screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
-            x = max(8, min(x, screen_w - width - 8))
-            if y + height > screen_h - 40:
-                up = self.winfo_rooty() - height - 6
-                if up >= 8:
-                    y = up
-        except tk.TclError:
-            pass
-
-        # Place the menu on the main window — a Toplevel becomes a real
-        # macOS document window (traffic lights + title) on current Tk.
-        rx = root.winfo_rootx()
-        ry = root.winfo_rooty()
-        local_x = int(x - rx)
-        local_y = int(y - ry)
-        local_x = max(8, min(local_x, max(8, root.winfo_width() - 16)))
-        width = min(width, max(160, root.winfo_width() - local_x - 8))
-        local_x = max(8, min(local_x, max(8, root.winfo_width() - width - 8)))
-        local_y = max(8, min(local_y, max(8, root.winfo_height() - height - 8)))
-
-        radius = 12
-        # Same inset RoundedCard uses when pad is omitted (max(8, radius)).
-        inset = max(8, radius)
+        radius = 8
+        inset = radius
         outer_w = int(width) + 2 * inset
         outer_h = int(height) + 2 * inset
-        local_x = max(8, min(local_x, max(8, root.winfo_width() - outer_w - 8)))
-        local_y = max(8, min(local_y, max(8, root.winfo_height() - outer_h - 8)))
+
+        rx = root.winfo_rootx()
+        ry = root.winfo_rooty()
+        field_right = self.winfo_rootx() + self.winfo_width() - rx
+        field_bottom = self.winfo_rooty() + self.winfo_height() - ry
+        local_x = int(field_right - outer_w)
+        local_y = int(field_bottom + 4)
+        try:
+            win_w, win_h = int(root.winfo_width()), int(root.winfo_height())
+        except tk.TclError:
+            win_w, win_h = 800, 600
+        local_x = max(8, min(local_x, max(8, win_w - outer_w - 8)))
+        if local_x + outer_w > win_w - 8:
+            outer_w = max(160, win_w - local_x - 8)
+            width = max(80, outer_w - 2 * inset)
+        if local_y + outer_h > win_h - 8:
+            up = int(self.winfo_rooty() - ry - outer_h - 6)
+            local_y = up if up >= 8 else max(8, win_h - outer_h - 8)
+
         fallback = self._parent_bg if str(self._parent_bg).startswith("#") else theme.APP_BG
         try:
             sx = int(root.winfo_rootx() + local_x)
@@ -573,7 +573,7 @@ class RoundedCombobox(tk.Frame):
             "se": _hex_bg_at(root, sx + outer_w - 1, sy + outer_h - 1, fallback),
         }
         card = RoundedCard(
-            root, bg=theme.FIELD_BG, radius=radius, outline=False,
+            root, bg=theme.FIELD_BG, radius=radius, outline=False, pad=inset,
             outer_bg=corner_bgs["nw"], corner_bgs=corner_bgs)
         card.place(x=local_x, y=local_y, width=outer_w, height=outer_h)
         card.lift()
@@ -583,8 +583,11 @@ class RoundedCombobox(tk.Frame):
             highlightthickness=0, borderwidth=0,
         )
         inner_h = max(len(self._values), 1) * row_h + 8
-        canvas.configure(scrollregion=(0, 0, width, inner_h))
-        if len(self._values) > 8:
+        canvas.configure(
+            scrollregion=(0, 0, width, inner_h),
+            yscrollincrement=row_h,
+        )
+        if len(self._values) > 10:
             sb = VectorScrollbar(card.body, command=canvas.yview, bg=theme.FIELD_BG)
             canvas.configure(yscrollcommand=sb.set)
             sb.pack(side="right", fill="y")
@@ -599,9 +602,6 @@ class RoundedCombobox(tk.Frame):
         canvas.bind("<ButtonRelease-1>", self._on_pick)
         canvas.bind("<Return>", self._on_pick)
         canvas.bind("<Escape>", lambda e: self._close_popup())
-        canvas.bind("<MouseWheel>", self._on_popup_wheel)
-        canvas.bind("<Button-4>", self._on_popup_wheel)
-        canvas.bind("<Button-5>", self._on_popup_wheel)
         card.bind("<Escape>", lambda e: self._close_popup())
 
         self._redraw_popup_rows()
@@ -624,7 +624,7 @@ class RoundedCombobox(tk.Frame):
             return
         c.delete("row")
         w = int(getattr(self, "_popup_width", 0) or c.winfo_width() or 200)
-        max_text = max(40, w - 28)
+        max_text = max(40, w - 20)
         current = self.current()
         for i, value in enumerate(self._values):
             y0 = 4 + i * self._popup_row_h
@@ -644,7 +644,7 @@ class RoundedCombobox(tk.Frame):
                     radius=8, fill=fill, outline="",
                     background=theme.FIELD_BG, tags="row")
             c.create_text(
-                16, (y0 + y1) / 2, text=self._fit_popup_text(str(value), max_text),
+                12, (y0 + y1) / 2, text=self._fit_popup_text(str(value), max_text),
                 fill=fg, font=self._tkfont, anchor="w", tags="row")
 
     def _popup_index_at(self, y: float) -> Optional[int]:
@@ -664,14 +664,55 @@ class RoundedCombobox(tk.Frame):
         self._popup_active = idx
         self._redraw_popup_rows()
 
+    def _popup_pointer_inside(self, event) -> bool:
+        popup = self._popup
+        if popup is None:
+            return False
+        try:
+            hovered = popup.winfo_containing(event.x_root, event.y_root)
+        except (tk.TclError, KeyError, TypeError):
+            hovered = None
+        if hovered is not None and self._is_within(hovered, popup):
+            return True
+        try:
+            x, y = event.x_root, event.y_root
+            return (popup.winfo_rootx() <= x <= popup.winfo_rootx() + popup.winfo_width()
+                    and popup.winfo_rooty() <= y <= popup.winfo_rooty() + popup.winfo_height())
+        except tk.TclError:
+            return False
+
     def _on_popup_wheel(self, event):
         c = self._popup_canvas
-        if c is None:
-            return "break"
+        if c is None or not self._popup_pointer_inside(event):
+            return
         if getattr(event, "num", None) == 4 or getattr(event, "delta", 0) > 0:
             c.yview_scroll(-1, "units")
         else:
             c.yview_scroll(1, "units")
+        return "break"
+
+    def _on_popup_touchpad(self, event):
+        c = self._popup_canvas
+        if c is None or not self._popup_pointer_inside(event):
+            return
+        try:
+            _dx, dy_str = self.tk.splitlist(
+                self.tk.call("tk::PreciseScrollDeltas", event.delta))
+            dy = int(dy_str)
+        except (tk.TclError, ValueError, AttributeError):
+            return
+        if dy == 0:
+            return "break"
+        try:
+            region = str(c.cget("scrollregion")).split()
+            content_h = float(region[3]) - float(region[1])
+            if content_h <= 0:
+                return "break"
+            new_top = c.yview()[0] * content_h - dy
+            new_top = max(0.0, min(new_top, content_h))
+            c.yview_moveto(new_top / content_h)
+        except (tk.TclError, ValueError, IndexError):
+            c.yview_scroll(-1 if dy > 0 else 1, "units")
         return "break"
 
     def _on_pick(self, event=None):
@@ -731,6 +772,81 @@ class RoundedCombobox(tk.Frame):
                 self._redraw()
         except tk.TclError:
             pass
+
+
+class RoundedEntry(tk.Frame):
+    """Text field in a pill, matching the sidebar search box and
+    RoundedCombobox -- ttk.Entry stays a hard rectangle on Aqua."""
+
+    def __init__(self, master, textvariable=None, width=24, show="", **kwargs):
+        bg = kwargs.pop("bg", None) or _parent_bg(master)
+        kwargs.setdefault("highlightthickness", 0)
+        super().__init__(master, bg=bg, **kwargs)
+        card = RoundedCard(
+            self, bg=theme.FIELD_BG, radius=10, pad=10, outline=False, shrink=True)
+        card.pack(fill="x", expand=True)
+        family = theme.resolve_font_family()
+        self._entry = tk.Entry(
+            card.body, textvariable=textvariable, font=(family, 11),
+            relief="flat", bd=0, highlightthickness=0, width=int(width) if width else 24,
+            bg=theme.FIELD_BG, fg=theme.TEXT_PRIMARY,
+            insertbackground=theme.TEXT_PRIMARY, show=show)
+        self._entry.pack(fill="x", ipady=3)
+
+    def configure(self, **kwargs):  # type: ignore[override]
+        if "show" in kwargs:
+            self._entry.configure(show=kwargs.pop("show"))
+        if kwargs:
+            super().configure(**kwargs)
+
+    def config(self, **kwargs):  # type: ignore[override]
+        self.configure(**kwargs)
+
+    def focus_set(self):
+        self._entry.focus_set()
+
+
+class RoundedCheckbutton(tk.Frame):
+    """A 20px rounded box plus label -- ttk.Checkbutton draws a square
+    indicator on Aqua regardless of style padding."""
+
+    def __init__(self, master, text: str = "", variable=None, command=None, **kwargs):
+        bg = kwargs.pop("bg", None) or _parent_bg(master)
+        kwargs.setdefault("highlightthickness", 0)
+        super().__init__(master, bg=bg, **kwargs)
+        self._bg = bg
+        self._var = variable if variable is not None else tk.BooleanVar(value=False)
+        self._command = command
+        self._box = tk.Canvas(self, width=22, height=22, bg=bg, highlightthickness=0)
+        self._box.pack(side="left")
+        family = theme.resolve_font_family()
+        self._label = tk.Label(
+            self, text=text, bg=bg, fg=theme.TEXT_PRIMARY, font=(family, 11),
+            anchor="w", justify="left")
+        self._label.pack(side="left", padx=(8, 0))
+        for widget in (self._box, self._label):
+            widget.bind("<Button-1>", self._toggle)
+        self.bind("<Button-1>", self._toggle)
+        self._trace = self._var.trace_add("write", lambda *_: self._redraw())
+        self._redraw()
+
+    def _toggle(self, _event=None):
+        self._var.set(not bool(self._var.get()))
+        if self._command is not None:
+            self._command()
+        return "break"
+
+    def _redraw(self):
+        c = self._box
+        c.delete("all")
+        on = bool(self._var.get())
+        fill = theme.ACCENT if on else theme.FIELD_BG
+        theme.place_rounded_rect(
+            c, 1, 1, 21, 21, radius=6, fill=fill, outline="",
+            background=self._bg)
+        if on:
+            c.create_line(6, 12, 10, 16, 16, 7, fill="#FFFFFF", width=2,
+                          capstyle="round", joinstyle="round")
 
 
 # ---------------------------------------------------------------------------

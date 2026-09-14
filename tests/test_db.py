@@ -62,6 +62,13 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(set(projects),
                           {config.DEFAULT_JIRA_PROJECT, "Other Client Project", "Third Project"})
 
+    def test_list_known_jira_projects_includes_activity_jira_projects(self):
+        act = self.db.list_activities()[0]
+        act.jira_project = "Synced From Jira"
+        self.db.update_activity(act)
+        projects = self.db.list_known_jira_projects()
+        self.assertIn("Synced From Jira", projects)
+
     def test_add_project_with_default_color_picks_an_unused_color(self):
         # Used by the Add QDM tab's inline "+ New Project..." flow (see
         # ActivityPanel.create_project in app/panels.py), which only asks

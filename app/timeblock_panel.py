@@ -25,6 +25,46 @@ from .widgets import RoundedButton, RoundedCombobox, ScrollArea, show_saved_toas
 _NEW_JIRA_PROJECT_OPTION = "+ New Project…"
 
 
+def activity_matching_jira_key(activities: List[Activity], typed: str) -> Optional[Activity]:
+    """Find the QDM whose Jira Issue Key matches what was typed in the
+    number-only field (with or without the QDM- prefix). Exact match only,
+    so typing "12" does not steal "QDM-123"."""
+    typed = (typed or "").strip()
+    if not typed:
+        return None
+    full = config.jira_key_from_number(typed)
+    if not full:
+        return None
+    want = full.strip().upper()
+    want_num = config.jira_key_number(full).strip().upper()
+    for activity in activities:
+        stored = (activity.jira_key or "").strip()
+        if not stored:
+            continue
+        if stored.upper() == want:
+            return activity
+        if config.jira_key_number(stored).strip().upper() == want_num:
+            return activity
+    return None
+
+
+def activity_matching_jira_project(activities: List[Activity], project: str) -> Optional[Activity]:
+    """If exactly one QDM uses this Jira Project, return it -- used when
+    the project dropdown is the thing the user changed and we can still
+    pick a QDM unambiguously. Many QDMs share one Jira project, so this
+    returns None whenever more than one (or zero) match."""
+    needle = (project or "").strip().lower()
+    if not needle or project == _NEW_JIRA_PROJECT_OPTION:
+        return None
+    matches = [
+        activity for activity in activities
+        if (activity.jira_project or "").strip().lower() == needle
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
 class TimeBlockPanel(tk.Frame):
     def __init__(self, master, family: str, on_close: Callable[[], None]):
         super().__init__(master, bg=theme.PANEL_BG)
@@ -40,6 +80,7 @@ class TimeBlockPanel(tk.Frame):
         self.time_options: List[str] = []
         self.known_jira_projects: List[str] = []
         self._previous_jira_project = ""
+        self._syncing = False
 
         # Wrapped in a borderless ScrollArea (see panels._scroll_body's
         # docstring for the same rationale) so this panel's Save/Cancel/
@@ -64,6 +105,7 @@ class TimeBlockPanel(tk.Frame):
         self.activity_combo.grid(row=row, column=1, columnspan=2, sticky="ew", pady=4)
         self.activity_combo.bind("<<ComboboxSelected>>", self._on_activity_changed)
         self.activity_combo.bind("<Return>", lambda e: self._save())
+        self.activity_var.trace_add("write", lambda *_: self._on_activity_changed())
         row += 1
 
         ttk.Label(frm, text="Jira Issue Key").grid(row=row, column=0, sticky="w", pady=4)
@@ -79,6 +121,7 @@ class TimeBlockPanel(tk.Frame):
         jira_key_entry = ttk.Entry(key_row, textvariable=self.jira_key_number_var, width=10)
         jira_key_entry.pack(side="left")
         jira_key_entry.bind("<Return>", lambda e: self._save())
+        self.jira_key_number_var.trace_add("write", lambda *_: self._on_jira_key_changed())
         row += 1
 
         # Labeled "Jira Project" (not "Project" or "QDM") so it isn't
@@ -146,17 +189,49 @@ class TimeBlockPanel(tk.Frame):
         self.btns.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(16, 0))
 
     # ------------------------------------------------------------------
+    def _apply_activity_fields(self, act: Activity):
+        """Copy this QDM's issue key and Jira project into the form."""
+        self.jira_key_number_var.set(config.jira_key_number(act.jira_key))
+        self._set_jira_project_from_activity(act)
+
+    def _set_jira_project_from_activity(self, act: Activity):
+        project = (act.jira_project or "").strip()
+        if not project:
+            return
+        self._ensure_known_jira_project(project)
+        self.jira_project_var.set(project)
+        self._previous_jira_project = project
+
+    def _ensure_known_jira_project(self, project: str):
+        if project.lower() not in {p.lower() for p in self.known_jira_projects}:
+            self.known_jira_projects.append(project)
+            self._refresh_jira_project_values()
+
     def _on_activity_changed(self, _event=None):
-        # Only the Jira Issue Key comes from the chosen QDM -- Jira
-        # Project/Issue Type no longer live on a QDM at all (they're
-        # this app's fixed defaults, or this block's own choice below),
-        # so switching QDMs leaves whatever was already picked for those
-        # alone instead of blanking it out.
-        name = self.activity_var.get()
-        for a in self.activities:
-            if a.name == name:
-                self.jira_key_number_var.set(config.jira_key_number(a.jira_key))
-                break
+        if self._syncing:
+            return
+        act = self._selected_activity()
+        if act is None:
+            return
+        self._syncing = True
+        try:
+            self._apply_activity_fields(act)
+        finally:
+            self._syncing = False
+
+    def _on_jira_key_changed(self, *_):
+        if self._syncing:
+            return
+        act = activity_matching_jira_key(self.activities, self.jira_key_number_var.get())
+        if act is None:
+            return
+        self._syncing = True
+        try:
+            self.activity_var.set(act.name)
+            self.activity_combo.set(act.name)
+            self._set_jira_project_from_activity(act)
+        finally:
+            self._syncing = False
 
     def _selected_activity(self) -> Optional[Activity]:
         name = self.activity_var.get()
@@ -169,8 +244,26 @@ class TimeBlockPanel(tk.Frame):
         self.jira_project_combo.config(values=self.known_jira_projects + [_NEW_JIRA_PROJECT_OPTION])
 
     def _on_jira_project_changed(self, _event=None):
-        if self.jira_project_var.get() != _NEW_JIRA_PROJECT_OPTION:
-            self._previous_jira_project = self.jira_project_var.get()
+        if self._syncing:
+            if self.jira_project_var.get() != _NEW_JIRA_PROJECT_OPTION:
+                self._previous_jira_project = self.jira_project_var.get()
+            return
+        chosen = self.jira_project_var.get()
+        if chosen != _NEW_JIRA_PROJECT_OPTION:
+            self._previous_jira_project = chosen
+            # Same two-way link as QDM ↔ issue key, but only when this
+            # Jira project belongs to exactly one QDM. Shared projects
+            # (the usual case) must not yank the QDM dropdown around.
+            act = activity_matching_jira_project(self.activities, chosen)
+            if act is None:
+                return
+            self._syncing = True
+            try:
+                self.activity_var.set(act.name)
+                self.activity_combo.set(act.name)
+                self.jira_key_number_var.set(config.jira_key_number(act.jira_key))
+            finally:
+                self._syncing = False
             return
         name = simpledialog.askstring(
             "New Jira Project",
@@ -181,12 +274,20 @@ class TimeBlockPanel(tk.Frame):
         if not name:
             # Cancelled, or left blank -- revert rather than leaving the
             # "+ New Project…" placeholder sitting there as if selected.
-            self.jira_project_var.set(self._previous_jira_project)
+            self._syncing = True
+            try:
+                self.jira_project_var.set(self._previous_jira_project)
+            finally:
+                self._syncing = False
             return
         if name.lower() not in {p.lower() for p in self.known_jira_projects}:
             self.known_jira_projects.append(name)
             self._refresh_jira_project_values()
-        self.jira_project_var.set(name)
+        self._syncing = True
+        try:
+            self.jira_project_var.set(name)
+        finally:
+            self._syncing = False
         self._previous_jira_project = name
 
     # ------------------------------------------------------------------
@@ -224,26 +325,39 @@ class TimeBlockPanel(tk.Frame):
         self.error_label.config(text="")
         self.notes_text.delete("1.0", "end")
 
-        self.activity_var.set("")
-        self.activity_combo.set("")
-        self.jira_key_number_var.set("")
-        if initial_activity_id is not None and initial_activity_id in self.activities_by_id:
-            act = self.activities_by_id[initial_activity_id]
-            self.activity_var.set(act.name)
-            self.activity_combo.set(act.name)
-            self.jira_key_number_var.set(config.jira_key_number(act.jira_key))
-
         self.known_jira_projects = list(known_jira_projects) or [config.DEFAULT_JIRA_PROJECT]
-        effective_jira_project = (initial_jira_project or "").strip() or config.DEFAULT_JIRA_PROJECT
-        if effective_jira_project.lower() not in {p.lower() for p in self.known_jira_projects}:
-            # A stored override that isn't in the known-projects list for
-            # whatever reason (e.g. old data) -- show it anyway rather
-            # than silently swapping in something this block doesn't
-            # actually use.
-            self.known_jira_projects.append(effective_jira_project)
-        self._refresh_jira_project_values()
-        self.jira_project_var.set(effective_jira_project)
-        self._previous_jira_project = effective_jira_project
+
+        self._syncing = True
+        try:
+            self.activity_var.set("")
+            self.activity_combo.set("")
+            self.jira_key_number_var.set("")
+            act = None
+            if initial_activity_id is not None and initial_activity_id in self.activities_by_id:
+                act = self.activities_by_id[initial_activity_id]
+                self.activity_var.set(act.name)
+                self.activity_combo.set(act.name)
+                self.jira_key_number_var.set(config.jira_key_number(act.jira_key))
+
+            # Editing a block keeps its stored Jira Project. A new block
+            # with a QDM already chosen (armed/dragged) uses that QDM's
+            # project so the dropdown matches the issue key we just filled.
+            effective_jira_project = (initial_jira_project or "").strip()
+            if not effective_jira_project and act is not None:
+                effective_jira_project = (act.jira_project or "").strip()
+            if not effective_jira_project:
+                effective_jira_project = config.DEFAULT_JIRA_PROJECT
+            if effective_jira_project.lower() not in {p.lower() for p in self.known_jira_projects}:
+                # A stored override that isn't in the known-projects list for
+                # whatever reason (e.g. old data) -- show it anyway rather
+                # than silently swapping in something this block doesn't
+                # actually use.
+                self.known_jira_projects.append(effective_jira_project)
+            self._refresh_jira_project_values()
+            self.jira_project_var.set(effective_jira_project)
+            self._previous_jira_project = effective_jira_project
+        finally:
+            self._syncing = False
 
         default_day = self.day_labels[0] if self.day_labels else ""
         day_label = self.day_label_by_key.get(initial_day_idx, default_day)

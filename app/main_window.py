@@ -21,15 +21,15 @@ from .summary_panel import SummaryPanel
 from .timeblock_panel import TimeBlockPanel
 from .timer_bar import TimerBar
 from .version import APP_VERSION
-from .widgets import RoundedButton, RoundedCombobox
+from .widgets import RoundedButton, RoundedCombobox, RoundedEntry
 
 
 class MainWindow(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("QUASAR Timesheet Manager")
-        self.geometry("1240x780")
-        self.minsize(1000, 640)
+        self.geometry("1240x680")
+        self.minsize(960, 520)
         self._center_on_start()
         self._log_startup_diagnostics()
 
@@ -71,7 +71,7 @@ class MainWindow(tk.Tk):
         # "hidden" removes the header row entirely. Any unrecognized/stale
         # value (a setting from an older build, a hand-edited db, ...)
         # falls back to "standard" rather than a KeyError deeper in
-        # _build_header's HEADER_STYLES lookup.
+        # _build_top_bar's HEADER_STYLES lookup.
         self.header_style = self.db.get_setting("header_style", "standard") or "standard"
         if self.header_style not in ("standard", "compact", "hidden"):
             self.header_style = "standard"
@@ -79,7 +79,7 @@ class MainWindow(tk.Tk):
         # Timer bar visibility (Settings tab). Defaults to shown ("1") so
         # existing installs' behavior is unchanged until someone opts in
         # to hiding it. self.timer_bar itself is always built (see
-        # _build_timer_bar) even when this is False -- only its on-screen
+        # _build_top_bar) even when this is False -- only its on-screen
         # row is skipped -- so a timer already running keeps running
         # invisibly rather than being interrupted by hiding the bar.
         self.show_timer_bar = (self.db.get_setting("show_timer_bar", "1") or "1") == "1"
@@ -107,8 +107,7 @@ class MainWindow(tk.Tk):
         self.configure(bg=theme.APP_BG)
 
         self._build_menu()
-        self._build_header()
-        self._build_timer_bar()
+        self._build_top_bar()
         self._build_body()
         self._bind_global_shortcuts()
 
@@ -128,6 +127,8 @@ class MainWindow(tk.Tk):
         # thread regardless (see _check_for_updates), this delay is just
         # about not kicking that thread off in the same instant as
         # everything else __init__ is doing.
+        self._jira_sync_in_flight = False
+        self.after(400, self._sync_qdms_on_startup)
         self.after(1500, self._check_for_updates)
 
     def _check_for_updates(self):
@@ -319,73 +320,55 @@ class MainWindow(tk.Tk):
     # the logo mark, its canvas, the outer row's vertical padding, and the
     # title's font size. "standard" matches the header's original,
     # unchanged look; "compact" shrinks all four; "hidden" isn't listed
-    # here since _build_header returns before using this at all in that
+    # here since _build_top_bar returns before using this at all in that
     # case.
     _HEADER_PROFILES = {
-        "standard": {"logo_size": 28, "canvas_px": 30, "pady": 14, "title_pt": 16},
-        "compact": {"logo_size": 16, "canvas_px": 18, "pady": 6, "title_pt": 12},
+        "standard": {"logo_size": 22, "canvas_px": 24, "pady": 6, "title_pt": 13},
+        "compact": {"logo_size": 16, "canvas_px": 18, "pady": 4, "title_pt": 12},
     }
 
-    def _build_header(self):
-        # "Hidden" removes the header row (and its separator) entirely --
-        # the Export CSV / Push to Jira buttons that used to live here now
-        # always live in the tab row instead (see _build_body), so nothing
-        # here is load-bearing for reaching those once the heading is hidden.
-        # On macOS a themed full-size titlebar still needs a strip of
-        # window color behind the traffic lights.
-        if self.header_style == "hidden":
-            if getattr(self, "_themed_titlebar", False):
+    def _build_top_bar(self, initial_timer_state=None):
+        # Title and timer share one toolbar row. Two stacked full-width
+        # bands (logo banner + padded timer card) were most of the
+        # vertical chrome on a laptop, and Tk would not shrink past them.
+        show_header = self.header_style != "hidden"
+        show_timer = self.show_timer_bar
+        themed = getattr(self, "_themed_titlebar", False)
+
+        if not show_header and not show_timer:
+            if themed:
                 tk.Frame(self, bg=theme.APP_BG, height=theme.MAC_TITLEBAR_PX).pack(fill="x")
+            self.timer_bar = TimerBar(
+                self, self.db, get_activities=lambda: self.db.list_activities(),
+                on_saved=self._on_timer_saved, family=self.family,
+                initial_state=initial_timer_state)
             return
 
+        bar = tk.Frame(self, bg=theme.PANEL_BG)
+        bar.pack(fill="x")
+        pad_l = theme.themed_titlebar_left_pad() if themed else 16
         profile = self._HEADER_PROFILES.get(self.header_style, self._HEADER_PROFILES["standard"])
+        inner = tk.Frame(bar, bg=theme.PANEL_BG)
+        inner.pack(fill="x", padx=(pad_l, 12), pady=profile["pady"] if show_header else 4)
 
-        header = tk.Frame(self, bg=theme.PANEL_BG)
-        header.pack(fill="x")
+        if show_header:
+            title_row = tk.Frame(inner, bg=theme.PANEL_BG)
+            title_row.pack(side="left")
+            logo = tk.Canvas(title_row, width=profile["canvas_px"], height=profile["canvas_px"],
+                              bg=theme.PANEL_BG, highlightthickness=0)
+            logo.pack(side="left", padx=(0, 8))
+            theme.draw_logo_mark(logo, size=profile["logo_size"])
+            tk.Label(title_row, text="QUASAR Timesheet Manager",
+                     font=(self.family, profile["title_pt"], "bold"),
+                     bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY).pack(side="left")
 
-        pad_l = (theme.themed_titlebar_left_pad() if getattr(self, "_themed_titlebar", False) else 20)
-        inner = tk.Frame(header, bg=theme.PANEL_BG)
-        inner.pack(fill="x", padx=(pad_l, 20), pady=profile["pady"])
-
-        title_row = tk.Frame(inner, bg=theme.PANEL_BG)
-        title_row.pack(side="left")
-        logo = tk.Canvas(title_row, width=profile["canvas_px"], height=profile["canvas_px"],
-                          bg=theme.PANEL_BG, highlightthickness=0)
-        logo.pack(side="left", padx=(0, 10))
-        theme.draw_logo_mark(logo, size=profile["logo_size"])
-        title_box = tk.Frame(title_row, bg=theme.PANEL_BG)
-        title_box.pack(side="left")
-        tk.Label(title_box, text="QUASAR Timesheet Manager", font=(self.family, profile["title_pt"], "bold"),
-                 bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY).pack(anchor="w")
-        if self.header_style == "standard":
-            tk.Label(title_box, text="Track time · sync QDMs · log hours to Jira",
-                     font=(self.family, 9), bg=theme.PANEL_BG, fg=theme.TEXT_MUTED).pack(anchor="w")
-
-        sep = tk.Frame(self, bg=theme.BORDER, height=1)
-        sep.pack(fill="x")
-
-    def _build_timer_bar(self, initial_timer_state=None):
-        # Its own full-width row rather than squeezing into the header's
-        # button cluster -- an activity picker + Start/Stop + a live
-        # elapsed readout don't comfortably fit alongside Settings/Export/
-        # Dark Mode at the window's minimum width, and it's arguably the
-        # single most-used control in the app, so it gets a row of its own
-        # instead of competing for space.
-        #
-        # Always constructed, even when the Settings "Hide the Timer bar"
-        # toggle is on -- only .pack() (and its separator) is skipped
-        # below. That way a timer already running keeps running
-        # invisibly rather than being interrupted by hiding the bar, and
-        # every other call site in this file (is_running/stop/
-        # refresh_activities/get_state) can keep assuming self.timer_bar
-        # exists without an extra None-check.
         self.timer_bar = TimerBar(
-            self, self.db, get_activities=lambda: self.db.list_activities(),
+            inner if show_timer else self, self.db,
+            get_activities=lambda: self.db.list_activities(),
             on_saved=self._on_timer_saved, family=self.family,
-            initial_state=initial_timer_state)
-        if not self.show_timer_bar:
-            return
-        self.timer_bar.pack(fill="x")
+            initial_state=initial_timer_state, bg=theme.PANEL_BG)
+        if show_timer:
+            self.timer_bar.pack(side="right" if show_header else "left")
 
         sep = tk.Frame(self, bg=theme.BORDER, height=1)
         sep.pack(fill="x")
@@ -556,7 +539,7 @@ class MainWindow(tk.Tk):
         # notebook.select()/tab(state=...) call anywhere in this file).
         # tab_row holds the hand-drawn tab strip on the left and Export
         # CSV / Push to Jira on the right -- those used to live in the
-        # header (see _build_header), but now always sit here instead,
+        # header (see _build_top_bar), but now always sit here instead,
         # regardless of which Heading size is chosen (including "hidden",
         # which has no header row left to hold them at all). self.tab_bar
         # itself holds only the tab buttons: _refresh_tab_bar() below
@@ -775,7 +758,7 @@ class MainWindow(tk.Tk):
         w = widget
         while w is not None:
             if isinstance(w, (tk.Entry, tk.Text, ttk.Entry, ttk.Combobox, ttk.Spinbox,
-                              RoundedCombobox)):
+                              RoundedCombobox, RoundedEntry)):
                 return True
             w = getattr(w, "master", None)
         return False
@@ -934,8 +917,7 @@ class MainWindow(tk.Tk):
             child.destroy()
 
         self._build_menu()
-        self._build_header()
-        self._build_timer_bar(initial_timer_state=timer_state)
+        self._build_top_bar(initial_timer_state=timer_state)
         self._build_body(initial_week_start=week_start)
 
     # ------------------------------------------------------------------
@@ -987,8 +969,8 @@ class MainWindow(tk.Tk):
                 config.set_show_weekends(new_show_weekends)
 
             # Same idea as hours_changed above, for the two Heading/Timer
-            # bar toggles: mutate the instance attributes _build_header/
-            # _build_timer_bar actually read *before* the rebuild below,
+            # bar toggles: mutate the instance attributes _build_top_bar
+            # actually reads *before* the rebuild below,
             # same as config.set_work_hours/set_show_weekends just did for
             # their own globals.
             chrome_changed = (new_show_timer_bar != current_show_timer_bar
@@ -1104,11 +1086,12 @@ class MainWindow(tk.Tk):
         show = messagebox.showwarning if kind == "warning" else messagebox.showinfo
         show(title, message, parent=self)
 
-    def _set_jira_busy(self, busy: bool, status: str = ""):
-        try:
-            self.config(cursor="watch" if busy else "")
-        except tk.TclError:
-            pass
+    def _set_jira_busy(self, busy: bool, status: str = "", *, quiet: bool = False):
+        if not quiet:
+            try:
+                self.config(cursor="watch" if busy else "")
+            except tk.TclError:
+                pass
         if hasattr(self, "settings_panel"):
             try:
                 if status:
@@ -1150,16 +1133,34 @@ class MainWindow(tk.Tk):
             "it does not change anything in Jira.",
             kind="info")
 
-    def _jira_job_failed(self, title: str, err: str):
-        self._set_jira_busy(False, err)
+    def _jira_job_failed(self, title: str, err: str, quiet: bool = False):
+        self._jira_sync_in_flight = False
+        self._set_jira_busy(False, err, quiet=quiet)
+        if quiet:
+            jira_client._log(f"startup sync failed: {err}")
+            return
         self._jira_alert(title, err)
+
+    def _sync_qdms_on_startup(self):
+        """Refresh assigned QDMs as soon as the window is up.
+
+        Quiet on purpose: no dialogs, no watch cursor, and a missing
+        token is skipped so a first launch without Jira configured
+        still opens normally. Manual Sync (sidebar / Settings / menu)
+        stays noisy so you still get the full result when you ask.
+        """
+        self._sync_qdms_from_jira_fields(None, quiet=True)
 
     def _sync_qdms_from_jira(self):
         self._sync_qdms_from_jira_fields(None)
 
-    def _sync_qdms_from_jira_fields(self, fields: Optional[dict]):
+    def _sync_qdms_from_jira_fields(self, fields: Optional[dict], *, quiet: bool = False):
+        if self._jira_sync_in_flight:
+            return
         creds = self._jira_creds(fields)
         if not creds.is_complete():
+            if quiet:
+                return
             self._jira_alert(
                 "Sync QDMs",
                 "Add your Jira site URL and API token in Settings first "
@@ -1167,7 +1168,8 @@ class MainWindow(tk.Tk):
             self._open_settings_dialog()
             return
 
-        self._set_jira_busy(True, "Fetching your assigned QDMs from Jira…")
+        self._jira_sync_in_flight = True
+        self._set_jira_busy(True, "Fetching your assigned QDMs from Jira…", quiet=quiet)
 
         def worker():
             # HTTP only on this thread. SQLite must stay on the Tk main
@@ -1180,13 +1182,19 @@ class MainWindow(tk.Tk):
                 jira_client._log(
                     f"fetch_issues failed: {type(exc).__name__}: {exc}\n"
                     f"{traceback.format_exc()}")
-                self.after(0, lambda err=err: self._jira_job_failed("Sync QDMs", err))
+                self.after(
+                    0,
+                    lambda err=err, quiet=quiet: self._jira_job_failed(
+                        "Sync QDMs", err, quiet=quiet))
                 return
-            self.after(0, lambda: self._apply_jira_sync(fetched))
+            self.after(
+                0,
+                lambda fetched=fetched, quiet=quiet: self._apply_jira_sync(
+                    fetched, quiet=quiet))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _apply_jira_sync(self, fetched):
+    def _apply_jira_sync(self, fetched, quiet: bool = False):
         try:
             issues = fetched.issues if isinstance(fetched, jira_client.FetchResult) else fetched
             open_capped = bool(getattr(fetched, "open_capped", False))
@@ -1198,14 +1206,17 @@ class MainWindow(tk.Tk):
                 open_capped=open_capped,
                 closed_capped=closed_capped,
             )
-            self._on_jira_sync_done(result)
+            self._on_jira_sync_done(result, quiet=quiet)
         except Exception as exc:
             jira_client._log(f"sync_issues_into_db failed: {exc}\n{traceback.format_exc()}")
-            self._jira_job_failed("Sync QDMs", str(exc))
+            self._jira_job_failed("Sync QDMs", str(exc), quiet=quiet)
 
-    def _on_jira_sync_done(self, result: jira_sync.SyncResult):
+    def _on_jira_sync_done(self, result: jira_sync.SyncResult, quiet: bool = False):
+        self._jira_sync_in_flight = False
         self._on_sidebar_change()
-        self._set_jira_busy(False, f"Fetched {result.fetched} assigned QDM(s).")
+        self._set_jira_busy(False, f"Fetched {result.fetched} assigned QDM(s).", quiet=quiet)
+        if quiet:
+            return
         if result.fetched == 0:
             self._jira_alert(
                 "Sync QDMs",

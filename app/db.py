@@ -796,9 +796,9 @@ class Database:
 
     def list_known_jira_projects(self) -> List[str]:
         """Distinct Jira Project values actually used somewhere in this
-        database (time blocks and template blocks), for offering as a
-        controlled pick-list on the Time Block tab instead of free text
-        that's easy to typo. Always includes config.DEFAULT_JIRA_PROJECT
+        database (time blocks, template blocks, and QDMs), for offering
+        as a controlled pick-list on the Time Block tab instead of free
+        text that's easy to typo. Always includes config.DEFAULT_JIRA_PROJECT
         first, even if nothing has explicitly used it yet, since that's
         what a block uses implicitly whenever it doesn't set its own
         (see app/export_csv.py) -- so it's always the sensible default
@@ -809,6 +809,9 @@ class Database:
                 "WHERE jira_project IS NOT NULL AND TRIM(jira_project) != '' "
                 "UNION "
                 "SELECT DISTINCT jira_project FROM template_entries "
+                "WHERE jira_project IS NOT NULL AND TRIM(jira_project) != '' "
+                "UNION "
+                "SELECT DISTINCT jira_project FROM activities "
                 "WHERE jira_project IS NOT NULL AND TRIM(jira_project) != ''"
             )
             used = sorted({str(r[0]).strip() for r in cur.fetchall()})

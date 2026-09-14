@@ -4,9 +4,11 @@ with its duration rounded to the nearest 15 minutes. This is the fast path
 for "what am I doing right now" -- no dragging on the grid, no picking
 exact start/end times by hand.
 
-Lives in the header (see MainWindow._build_timer_bar) rather than either
-sidebar, because it always logs against today's real date regardless of
-which tab (Timesheet/Template) or which week is currently on screen.
+Lives in the top toolbar (see MainWindow._build_top_bar) rather than
+either sidebar, because it always logs against today's real date
+regardless of which tab (Timesheet/Template) or which week is currently
+on screen. Packed on the same row as the title so it doesn't spend a
+full-width card of padding on a laptop screen.
 """
 import tkinter as tk
 from datetime import datetime, timedelta
@@ -17,19 +19,15 @@ from . import theme
 from .db import Database
 from .models import Activity, TimeEntry
 from .time_rounding import round_duration_minutes
-from .widgets import CARD_RADIUS, RoundedButton, RoundedCard, RoundedCombobox
+from .widgets import RoundedButton, RoundedCombobox
 
 
 class TimerBar(tk.Frame):
     def __init__(self, master, db: Database, get_activities: Callable[[], List[Activity]],
                  on_saved: Callable[[TimeEntry], None], family: str,
                  initial_state: Optional[dict] = None, **kwargs):
-        # The outer Frame sits flush against the window (packed fill="x"
-        # with no margin, same as the header above it) -- its bg has to
-        # match the window's own background so the RoundedCard inside has
-        # something consistent to blend its corners into, exactly like
-        # every other rounded element in this app.
-        kwargs.setdefault("bg", theme.APP_BG)
+        bg = kwargs.pop("bg", None) or theme.PANEL_BG
+        kwargs.setdefault("bg", bg)
         super().__init__(master, **kwargs)
         self.db = db
         self.get_activities = get_activities
@@ -40,58 +38,33 @@ class TimerBar(tk.Frame):
         self.start_dt: Optional[datetime] = None
         self._tick_job: Optional[str] = None
 
-        card = RoundedCard(self, bg=theme.ACCENT_SOFT, radius=CARD_RADIUS, outline=False)
-        card.pack(fill="x", padx=20, pady=8)
-        inner = tk.Frame(card.body, bg=theme.ACCENT_SOFT)
-        inner.pack(fill="x", padx=14, pady=8)
-
-        tk.Label(inner, text="Timer", font=(self.family, 10, "bold"),
-                 bg=theme.ACCENT_SOFT, fg=theme.TEXT_PRIMARY).pack(side="left", padx=(0, 10))
+        inner = tk.Frame(self, bg=bg)
+        inner.pack(fill="x")
 
         self.activity_var = tk.StringVar()
         self.activity_combo = RoundedCombobox(inner, textvariable=self.activity_var,
-                                               state="readonly", width=22, bg=theme.ACCENT_SOFT)
+                                               state="readonly", width=22, bg=bg)
         self.activity_combo.pack(side="left", padx=(0, 8))
 
         self.toggle_btn = RoundedButton(inner, text="Start Timer", style="Accent.TButton",
-                                         command=self._toggle, bg=theme.ACCENT_SOFT)
+                                         command=self._toggle, bg=bg)
         self.toggle_btn.pack(side="left")
 
         # A small drawn dot rather than a colored emoji/glyph for the
         # "recording" indicator -- same reasoning as the logo mark and the
         # folder disclosure arrow elsewhere in this app: a couple of drawn
         # pixels render identically everywhere, a font glyph might not.
-        self.dot = tk.Canvas(inner, width=10, height=10, bg=theme.ACCENT_SOFT,
-                              highlightthickness=0)
-        self.dot.pack(side="left", padx=(14, 4))
+        self.dot = tk.Canvas(inner, width=10, height=10, bg=bg, highlightthickness=0)
+        self.dot.pack(side="left", padx=(10, 4))
 
         self.elapsed_label = tk.Label(inner, text="", font=(self.family, 10, "bold"),
-                                       bg=theme.ACCENT_SOFT, fg=theme.TEXT_PRIMARY, width=8,
+                                       bg=bg, fg=theme.TEXT_PRIMARY, width=8,
                                        anchor="w")
         self.elapsed_label.pack(side="left")
 
         self.status_label = tk.Label(inner, text="", font=(self.family, 9),
-                                      bg=theme.ACCENT_SOFT, fg=theme.TEXT_SECONDARY)
-        self.status_label.pack(side="right")
-
-        # RoundedCard's interior (`.body`) is positioned with `.place()`,
-        # which -- unlike pack/grid -- never reports a child's natural size
-        # back up to its own parent (place() decouples geometry
-        # propagation in both directions, by design). Every other
-        # RoundedCard in this app sits inside a parent chain that already
-        # has a real, top-down size from the window's own geometry (the
-        # Activities sidebar, the calendar grid, both ultimately sized via
-        # fill="both"/expand=True chains back to the window itself), so
-        # that never mattered there. This bar has no such ancestor --
-        # MainWindow packs it with only fill="x" between the header and
-        # the notebook, so its height has always come from this row of
-        # controls' own natural size, computed the ordinary bottom-up way
-        # pack does it. Measure that explicitly and set it on the card --
-        # otherwise the card's requested height collapses toward Tk's
-        # near-zero default (RoundedCard._redraw() draws nothing at all
-        # below 2px), which is exactly what made the whole bar disappear.
-        self.update_idletasks()
-        card.configure(height=inner.winfo_reqheight() + 16 + 2 * card._inset)
+                                      bg=bg, fg=theme.TEXT_SECONDARY)
+        self.status_label.pack(side="left", padx=(8, 0))
 
         self.refresh_activities()
 

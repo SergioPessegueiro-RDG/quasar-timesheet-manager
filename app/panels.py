@@ -23,7 +23,10 @@ from typing import Callable, Dict, List, Optional, Union
 from . import config, theme
 from .models import Activity, Project, TemplateEntry, TimeEntry
 from .version import APP_VERSION
-from .widgets import RoundedButton, RoundedCombobox, ScrollArea, show_saved_toast
+from .widgets import (
+    RoundedButton, RoundedCard, RoundedCheckbutton, RoundedCombobox, RoundedEntry,
+    ScrollArea, show_saved_toast,
+)
 
 EntryLike = Union[TimeEntry, TemplateEntry]
 
@@ -84,6 +87,28 @@ def _configure_half_width_columns(outer: tk.Frame):
     is."""
     outer.columnconfigure(0, weight=1)
     outer.columnconfigure(1, weight=1)
+
+
+def _settings_card(parent, row: int, pady=(0, 16)):
+    """A SURFACE rounded card for one Settings section."""
+    card = RoundedCard(parent, bg=theme.SURFACE, radius=14, outline=False, shrink=True)
+    card.grid(row=row, column=0, columnspan=2, sticky="ew", pady=pady)
+    inner = tk.Frame(card.body, bg=theme.SURFACE)
+    inner.pack(fill="both", expand=True, padx=2, pady=2)
+    inner.columnconfigure(0, weight=1)
+    return inner
+
+
+def _settings_heading(parent, text: str, family: str, row: int = 0):
+    tk.Label(parent, text=text, font=(family, 12, "bold"),
+             bg=theme.SURFACE, fg=theme.TEXT_PRIMARY).grid(
+        row=row, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
+
+def _settings_hint(parent, text: str, family: str, row: int, pady=(0, 10)):
+    tk.Label(parent, text=text, fg=theme.TEXT_MUTED, bg=theme.SURFACE,
+             justify="left", wraplength=420, font=(family, 9)).grid(
+        row=row, column=0, columnspan=2, sticky="w", pady=pady)
 
 
 def _rebind_wheel(widget):
@@ -593,12 +618,15 @@ class SettingsPanel(tk.Frame):
         # it beside the settings instead uses the space
         # _configure_half_width_columns opened up on the right rather than
         # leaving it empty.
-        left = ttk.Frame(outer)
+        self._card_bg = theme.SURFACE
+
+        left = tk.Frame(outer, bg=theme.PANEL_BG)
         left.grid(row=1, column=0, sticky="new", padx=(0, 36))
         left.columnconfigure(0, weight=1)
 
-        right = ttk.Frame(outer)
+        right = tk.Frame(outer, bg=theme.PANEL_BG)
         right.grid(row=1, column=1, sticky="new")
+        right.columnconfigure(0, weight=1)
 
         # `left` and `right` split `outer` into two equal-*weight* columns
         # (_configure_half_width_columns), but neither one's actual
@@ -625,182 +653,177 @@ class SettingsPanel(tk.Frame):
         outer.bind("<Configure>", self._reflow_settings_columns)
         outer.after_idle(self._reflow_settings_columns)
 
-        ttk.Label(left, text="Display Name", style="Heading.TLabel").grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        tk.Label(left, text="Appears in every exported row.",
-                 fg=theme.TEXT_MUTED, bg=theme.PANEL_BG, justify="left", wraplength=420,
-                 font=(self.family, 9)).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        name_card = _settings_card(left, 0)
+        _settings_heading(name_card, "Display Name", self.family)
+        _settings_hint(name_card, "Appears in every exported row.", self.family, 1)
         self.display_name_var = tk.StringVar()
-        ttk.Entry(left, textvariable=self.display_name_var, width=36, style="Big.TEntry").grid(
-            row=2, column=0, sticky="ew", pady=(0, 28))
+        RoundedEntry(name_card, textvariable=self.display_name_var, width=36,
+                     bg=theme.SURFACE).grid(row=2, column=0, sticky="ew")
 
-        ttk.Label(left, text="Jira", style="Heading.TLabel").grid(
-            row=3, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        tk.Label(left, text="Paste an API token (Atlassian account → Security → API tokens). "
-                            "Site URL can be https://your-company.atlassian.net or any "
-                            "dashboard / board link — extra path is stripped. Sync pulls "
-                            "open QDMs assigned to you. The token never leaves this machine.",
-                 fg=theme.TEXT_MUTED, bg=theme.PANEL_BG, justify="left", wraplength=420,
-                 font=(self.family, 9)).grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 10))
-
-        jira_fields = tk.Frame(left, bg=theme.PANEL_BG)
-        jira_fields.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        jira_card = _settings_card(left, 1)
+        _settings_heading(jira_card, "Jira", self.family)
+        _settings_hint(
+            jira_card,
+            "Paste an API token (Atlassian account → Security → API tokens). "
+            "Site URL can be https://your-company.atlassian.net or any "
+            "dashboard / board link — extra path is stripped. Sync pulls "
+            "open QDMs assigned to you. The token never leaves this machine.",
+            self.family, 1)
+        jira_fields = tk.Frame(jira_card, bg=theme.SURFACE)
+        jira_fields.grid(row=2, column=0, columnspan=2, sticky="ew")
         jira_fields.columnconfigure(1, weight=1)
 
-        ttk.Label(jira_fields, text="Site URL").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        tk.Label(jira_fields, text="Site URL", bg=theme.SURFACE, fg=theme.TEXT_PRIMARY,
+                 font=(self.family, 10)).grid(row=0, column=0, sticky="w", pady=(0, 6))
         self.jira_url_var = tk.StringVar()
-        ttk.Entry(jira_fields, textvariable=self.jira_url_var, width=36, style="Big.TEntry").grid(
-            row=0, column=1, sticky="ew", padx=(12, 0), pady=(0, 6))
+        RoundedEntry(jira_fields, textvariable=self.jira_url_var, width=36,
+                     bg=theme.SURFACE).grid(row=0, column=1, sticky="ew", padx=(12, 0), pady=(0, 6))
         tk.Label(jira_fields, text="https://your-company.atlassian.net  — a dashboard link is fine too",
-                 fg=theme.TEXT_MUTED, bg=theme.PANEL_BG, font=(self.family, 8)).grid(
+                 fg=theme.TEXT_MUTED, bg=theme.SURFACE, font=(self.family, 8)).grid(
             row=1, column=1, sticky="w", padx=(12, 0), pady=(0, 10))
 
-        ttk.Label(jira_fields, text="Email").grid(row=2, column=0, sticky="w", pady=(0, 6))
+        tk.Label(jira_fields, text="Email", bg=theme.SURFACE, fg=theme.TEXT_PRIMARY,
+                 font=(self.family, 10)).grid(row=2, column=0, sticky="w", pady=(0, 6))
         self.jira_email_var = tk.StringVar()
-        ttk.Entry(jira_fields, textvariable=self.jira_email_var, width=36, style="Big.TEntry").grid(
-            row=2, column=1, sticky="ew", padx=(12, 0), pady=(0, 12))
+        RoundedEntry(jira_fields, textvariable=self.jira_email_var, width=36,
+                     bg=theme.SURFACE).grid(row=2, column=1, sticky="ew", padx=(12, 0), pady=(0, 12))
 
-        ttk.Label(jira_fields, text="API token").grid(row=3, column=0, sticky="w", pady=(0, 6))
-        token_row = tk.Frame(jira_fields, bg=theme.PANEL_BG)
+        tk.Label(jira_fields, text="API token", bg=theme.SURFACE, fg=theme.TEXT_PRIMARY,
+                 font=(self.family, 10)).grid(row=3, column=0, sticky="w", pady=(0, 6))
+        token_row = tk.Frame(jira_fields, bg=theme.SURFACE)
         token_row.grid(row=3, column=1, sticky="ew", padx=(12, 0), pady=(0, 12))
         token_row.columnconfigure(0, weight=1)
         self.jira_token_var = tk.StringVar()
-        self.jira_token_entry = ttk.Entry(token_row, textvariable=self.jira_token_var,
-                                           width=28, style="Big.TEntry", show="•")
+        self.jira_token_entry = RoundedEntry(
+            token_row, textvariable=self.jira_token_var, width=28, show="•", bg=theme.SURFACE)
         self.jira_token_entry.pack(side="left", fill="x", expand=True)
         self._jira_token_visible = False
         RoundedButton(token_row, text="Show", style="Secondary.TButton",
-                      command=self._toggle_jira_token).pack(side="left", padx=(8, 0))
+                      command=self._toggle_jira_token, bg=theme.SURFACE).pack(side="left", padx=(8, 0))
 
-        ttk.Label(jira_fields, text="Project key").grid(row=4, column=0, sticky="w", pady=(0, 6))
+        tk.Label(jira_fields, text="Project key", bg=theme.SURFACE, fg=theme.TEXT_PRIMARY,
+                 font=(self.family, 10)).grid(row=4, column=0, sticky="w", pady=(0, 6))
         self.jira_project_key_var = tk.StringVar(value="QDM")
-        ttk.Entry(jira_fields, textvariable=self.jira_project_key_var, width=12,
-                  style="Big.TEntry").grid(row=4, column=1, sticky="w", padx=(12, 0), pady=(0, 12))
+        RoundedEntry(jira_fields, textvariable=self.jira_project_key_var, width=12,
+                     bg=theme.SURFACE).grid(row=4, column=1, sticky="w", padx=(12, 0), pady=(0, 12))
 
-        jira_btns = tk.Frame(jira_fields, bg=theme.PANEL_BG)
+        jira_btns = tk.Frame(jira_fields, bg=theme.SURFACE)
         jira_btns.grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 4))
         RoundedButton(jira_btns, text="Test connection", style="Secondary.TButton",
-                      command=self._test_jira).pack(side="left")
+                      command=self._test_jira, bg=theme.SURFACE).pack(side="left")
         RoundedButton(jira_btns, text="Sync QDMs now", style="Accent.TButton",
-                      command=self._sync_jira).pack(side="left", padx=(8, 0))
+                      command=self._sync_jira, bg=theme.SURFACE).pack(side="left", padx=(8, 0))
         self.jira_status_label = tk.Label(jira_fields, text="", fg=theme.TEXT_SECONDARY,
-                                           bg=theme.PANEL_BG, font=(self.family, 9),
+                                           bg=theme.SURFACE, font=(self.family, 9),
                                            wraplength=420, justify="left")
-        self.jira_status_label.grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 18))
+        self.jira_status_label.grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.on_test_jira: Optional[Callable[[dict], None]] = None
         self.on_sync_jira: Optional[Callable[[dict], None]] = None
 
-        ttk.Label(left, text="Work Hours", style="Heading.TLabel").grid(
-            row=6, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        tk.Label(left, text="Which hours the calendar grid shows, and whether it includes "
-                            "Saturday/Sunday. Applies to the Timesheet and Template tabs alike.",
-                 fg=theme.TEXT_MUTED, bg=theme.PANEL_BG, justify="left", wraplength=420,
-                 font=(self.family, 9)).grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 10))
-
-        hours_row = tk.Frame(left, bg=theme.PANEL_BG)
-        hours_row.grid(row=8, column=0, columnspan=2, sticky="w", pady=(0, 14))
-        # Index-based (not string-parsed) round trip: each Combobox's
-        # `values` is a list of display labels ("9 AM", etc.); the actual
-        # hour that label maps to is looked up by matching index in the
-        # parallel _start_hour_values/_end_hour_values lists below, both
-        # in load() and in _save() -- avoids re-parsing "9 AM" back into
-        # an hour number and all the AM/PM edge cases that would invite.
+        hours_card = _settings_card(left, 2)
+        _settings_heading(hours_card, "Work Hours", self.family)
+        _settings_hint(
+            hours_card,
+            "Which hours the calendar grid shows, and whether it includes "
+            "Saturday/Sunday. Applies to the Timesheet and Template tabs alike.",
+            self.family, 1)
+        hours_row = tk.Frame(hours_card, bg=theme.SURFACE)
+        hours_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 14))
         self._start_hour_values = list(range(0, 24))
         self._end_hour_values = list(range(1, 25))
         start_labels = [self._format_hour(h) for h in self._start_hour_values]
         end_labels = [self._format_hour(h) for h in self._end_hour_values]
 
-        ttk.Label(hours_row, text="From", style="Big.TLabel").pack(side="left")
+        tk.Label(hours_row, text="From", bg=theme.SURFACE, fg=theme.TEXT_PRIMARY,
+                 font=(self.family, 11)).pack(side="left")
         self.work_start_var = tk.StringVar()
         self.work_start_combo = RoundedCombobox(hours_row, textvariable=self.work_start_var,
                                                  values=start_labels, state="readonly", width=8,
-                                                 style="Big.TCombobox")
+                                                 style="Big.TCombobox", bg=theme.SURFACE)
         self.work_start_combo.pack(side="left", padx=(8, 20))
 
-        ttk.Label(hours_row, text="To", style="Big.TLabel").pack(side="left")
+        tk.Label(hours_row, text="To", bg=theme.SURFACE, fg=theme.TEXT_PRIMARY,
+                 font=(self.family, 11)).pack(side="left")
         self.work_end_var = tk.StringVar()
         self.work_end_combo = RoundedCombobox(hours_row, textvariable=self.work_end_var,
                                                values=end_labels, state="readonly", width=8,
-                                               style="Big.TCombobox")
+                                               style="Big.TCombobox", bg=theme.SURFACE)
         self.work_end_combo.pack(side="left", padx=(8, 0))
 
         self.show_weekends_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(left, text="Show weekends (Saturday & Sunday)",
-                         variable=self.show_weekends_var, style="Big.TCheckbutton").grid(
-            row=9, column=0, columnspan=2, sticky="w", pady=(0, 14))
+        RoundedCheckbutton(hours_card, text="Show weekends (Saturday & Sunday)",
+                           variable=self.show_weekends_var, bg=theme.SURFACE).grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(0, 12))
 
-        # Checked = hidden (not "shown"): this is an opt-*in* away from the
-        # default, so "Hide the Timer bar" reads more naturally as the
-        # thing you're turning on than a double-negative "Don't show the
-        # Timer bar" would -- _save() below inverts it back to the
-        # show_timer_bar bool main_window.py actually persists/reads.
         self.hide_timer_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(left, text="Hide the Timer bar",
-                         variable=self.hide_timer_var, style="Big.TCheckbutton").grid(
-            row=10, column=0, columnspan=2, sticky="w", pady=(0, 2))
-        tk.Label(left, text="Frees up space above the calendar. Turn back on here any time.",
-                 fg=theme.TEXT_MUTED, bg=theme.PANEL_BG, justify="left", wraplength=420,
-                 font=(self.family, 9)).grid(row=11, column=0, columnspan=2, sticky="w", pady=(0, 20))
+        RoundedCheckbutton(hours_card, text="Hide the Timer bar",
+                           variable=self.hide_timer_var, bg=theme.SURFACE).grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(0, 2))
+        tk.Label(hours_card, text="Frees up space above the calendar. Turn back on here any time.",
+                 fg=theme.TEXT_MUTED, bg=theme.SURFACE, justify="left", wraplength=420,
+                 font=(self.family, 9)).grid(row=5, column=0, columnspan=2, sticky="w")
 
-        ttk.Label(left, text="Heading", style="Heading.TLabel").grid(
-            row=12, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        tk.Label(left, text="Standard shows the full title bar. Compact shrinks it. Hidden "
-                            "removes it -- the calendar gets that space back either way.",
-                 fg=theme.TEXT_MUTED, bg=theme.PANEL_BG, justify="left", wraplength=420,
-                 font=(self.family, 9)).grid(row=13, column=0, columnspan=2, sticky="w", pady=(0, 8))
-        self.header_style_row = tk.Frame(left, bg=theme.PANEL_BG)
-        self.header_style_row.grid(row=14, column=0, columnspan=2, sticky="w", pady=(0, 28))
+        heading_card = _settings_card(left, 3)
+        _settings_heading(heading_card, "Heading", self.family)
+        _settings_hint(
+            heading_card,
+            "Standard keeps a compact title next to the timer. Compact shrinks "
+            "it further. Hidden removes the name -- the calendar gets that space.",
+            self.family, 1, pady=(0, 8))
+        self.header_style_row = tk.Frame(heading_card, bg=theme.SURFACE)
+        self.header_style_row.grid(row=2, column=0, columnspan=2, sticky="w")
         self.header_style_choice = "standard"
         self.header_style_buttons: Dict[str, RoundedButton] = {}
         for key, label in (("standard", "Standard"), ("compact", "Compact"), ("hidden", "Hidden")):
             btn = RoundedButton(self.header_style_row, text=label, style="Secondary.TButton",
-                                 command=lambda k=key: self._select_header_style(k))
+                                 command=lambda k=key: self._select_header_style(k),
+                                 bg=theme.SURFACE)
             btn.pack(side="left", padx=(0, 6))
             self.header_style_buttons[key] = btn
 
-        ttk.Label(left, text="Theme", style="Heading.TLabel").grid(
-            row=15, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        theme_card = _settings_card(left, 4, pady=(0, 0))
+        _settings_heading(theme_card, "Theme", self.family)
         self.theme_description_label = tk.Label(
-            left, text="", fg=theme.TEXT_MUTED, bg=theme.PANEL_BG, justify="left",
+            theme_card, text="", fg=theme.TEXT_MUTED, bg=theme.SURFACE, justify="left",
             wraplength=480, font=(self.family, 9))
-        self.theme_description_label.grid(row=16, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        self.theme_description_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
-        self.theme_grid = ttk.Frame(left)
-        self.theme_grid.grid(row=17, column=0, columnspan=2, sticky="w", pady=(0, 12))
+        self.theme_grid = tk.Frame(theme_card, bg=theme.SURFACE)
+        self.theme_grid.grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 12))
         self._build_theme_grid()
 
-        # Only visible while "Custom" is the selected card above (toggled
-        # in _refresh_theme_selection via grid()/grid_remove(), which Tk
-        # remembers the row/col/sticky/pady for automatically -- no need
-        # to repeat them at toggle time).
-        self.custom_controls_frame = tk.Frame(left, bg=theme.PANEL_BG)
-        self.custom_controls_frame.grid(row=18, column=0, columnspan=2, sticky="w", pady=(0, 16))
+        self.custom_controls_frame = tk.Frame(theme_card, bg=theme.SURFACE)
+        self.custom_controls_frame.grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 16))
         self._build_custom_controls()
 
-        self.glass_alpha_frame = tk.Frame(left, bg=theme.PANEL_BG)
-        self.glass_alpha_frame.grid(row=19, column=0, columnspan=2, sticky="ew", pady=(0, 16))
-        left.columnconfigure(0, weight=1)
+        self.glass_alpha_frame = tk.Frame(theme_card, bg=theme.SURFACE)
+        self.glass_alpha_frame.grid(row=4, column=0, columnspan=2, sticky="ew")
+        theme_card.columnconfigure(0, weight=1)
         self._build_glass_alpha_controls()
 
-        ttk.Label(right, text="Keyboard Shortcuts", style="Heading.TLabel").grid(
-            row=0, column=0, sticky="w", pady=(0, 10))
-        shortcuts = tk.Frame(right, bg=theme.PANEL_BG)
-        shortcuts.grid(row=1, column=0, sticky="new")
+        shortcuts_card = RoundedCard(right, bg=theme.SURFACE, radius=14, outline=False, shrink=True)
+        shortcuts_card.grid(row=0, column=0, sticky="ew")
+        shortcuts_inner = tk.Frame(shortcuts_card.body, bg=theme.SURFACE)
+        shortcuts_inner.pack(fill="both", expand=True, padx=2, pady=2)
+        tk.Label(shortcuts_inner, text="Keyboard Shortcuts", font=(self.family, 12, "bold"),
+                 bg=theme.SURFACE, fg=theme.TEXT_PRIMARY).pack(anchor="w", pady=(0, 10))
+        shortcuts = tk.Frame(shortcuts_inner, bg=theme.SURFACE)
+        shortcuts.pack(fill="x")
         for i, (keys, description) in enumerate(_SHORTCUTS):
             tk.Label(shortcuts, text=keys, font=(self.family, 10, "bold"),
-                     bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY, anchor="nw",
+                     bg=theme.SURFACE, fg=theme.TEXT_PRIMARY, anchor="nw",
                      justify="left", wraplength=260).grid(
                 row=i, column=0, sticky="nw", padx=(0, 16), pady=5)
             tk.Label(shortcuts, text=description, font=(self.family, 10),
-                     bg=theme.PANEL_BG, fg=theme.TEXT_SECONDARY, anchor="nw",
+                     bg=theme.SURFACE, fg=theme.TEXT_SECONDARY, anchor="nw",
                      justify="left", wraplength=360).grid(row=i, column=1, sticky="nw", pady=5)
 
         tk.Label(right, text=f"QUASAR Timesheet Manager v{APP_VERSION}",
                  font=(self.family, 9), bg=theme.PANEL_BG, fg=theme.TEXT_MUTED).grid(
-            row=2, column=0, sticky="w", pady=(20, 0))
+            row=1, column=0, sticky="w", pady=(16, 0))
         tk.Label(right, text="Alex Rae  ·  Sérgio Pessegueiro",
                  font=(self.family, 9), bg=theme.PANEL_BG, fg=theme.TEXT_MUTED).grid(
-            row=3, column=0, sticky="w", pady=(2, 0))
+            row=2, column=0, sticky="w", pady=(2, 0))
 
         # row=20 (not row=2) so this stays below Keyboard Shortcuts either
         # way -- beside the settings fields at row=1 (the normal, wide-
@@ -808,7 +831,7 @@ class SettingsPanel(tk.Frame):
         # _reflow_settings_columns) -- without needing to move this row
         # to match whichever layout is currently active. An unused grid
         # row number doesn't reserve any space, so this doesn't add a gap.
-        btns = ttk.Frame(outer)
+        btns = tk.Frame(outer, bg=theme.PANEL_BG)
         btns.grid(row=20, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         RoundedButton(btns, text="Cancel", style="Secondary.TButton", command=self._cancel).pack(side="right")
         RoundedButton(btns, text="Save", style="Accent.TButton", command=self._save).pack(side="right", padx=6)
@@ -899,22 +922,22 @@ class SettingsPanel(tk.Frame):
                     grid_row += 1
                     col = 0
                 heading = tk.Label(self.theme_grid, text=cat, font=(self.family, 10, "bold"),
-                                    bg=theme.PANEL_BG, fg=theme.TEXT_SECONDARY, anchor="w")
+                                    bg=self._card_bg, fg=theme.TEXT_SECONDARY, anchor="w")
                 heading.grid(row=grid_row, column=0, columnspan=cols, sticky="w",
                              padx=6, pady=(14 if prev_cat else 0, 4))
                 grid_row += 1
                 prev_cat = cat
-            cell = tk.Frame(self.theme_grid, bg=theme.PANEL_BG)
+            cell = tk.Frame(self.theme_grid, bg=self._card_bg)
             cell.grid(row=grid_row, column=col, padx=6, pady=6)
 
-            canvas = tk.Canvas(cell, width=132, height=88, bg=theme.PANEL_BG, highlightthickness=0,
+            canvas = tk.Canvas(cell, width=132, height=88, bg=self._card_bg, highlightthickness=0,
                                 cursor="hand2")
             canvas.pack()
             canvas.bind("<Button-1>", lambda e, tid=theme_id: self._select_theme(tid))
             self.theme_swatch_canvases[theme_id] = canvas
 
             label = tk.Label(cell, text=theme.get_theme(theme_id)["label"], font=(self.family, 9),
-                              bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY, cursor="hand2")
+                              bg=self._card_bg, fg=theme.TEXT_PRIMARY, cursor="hand2")
             label.pack(pady=(4, 0))
             label.bind("<Button-1>", lambda e, tid=theme_id: self._select_theme(tid))
             col += 1
@@ -936,48 +959,49 @@ class SettingsPanel(tk.Frame):
             ("text_primary", "Text"), ("accent", "Accent"),
         ]
         for i, (key, label) in enumerate(fields):
-            cell = tk.Frame(self.custom_controls_frame, bg=theme.PANEL_BG)
+            cell = tk.Frame(self.custom_controls_frame, bg=self._card_bg)
             cell.grid(row=0, column=i, padx=(0, 20), sticky="w")
             tk.Label(cell, text=label, font=(self.family, 9),
-                     bg=theme.PANEL_BG, fg=theme.TEXT_SECONDARY).pack(anchor="w")
-            picker_row = tk.Frame(cell, bg=theme.PANEL_BG)
+                     bg=self._card_bg, fg=theme.TEXT_SECONDARY).pack(anchor="w")
+            picker_row = tk.Frame(cell, bg=self._card_bg)
             picker_row.pack(anchor="w", pady=(2, 0))
-            canvas = tk.Canvas(picker_row, width=28, height=28, bg=theme.PANEL_BG,
+            canvas = tk.Canvas(picker_row, width=28, height=28, bg=self._card_bg,
                                 highlightthickness=0, cursor="hand2")
             canvas.pack(side="left", padx=(0, 8))
             canvas.bind("<Button-1>", lambda e, k=key: self._pick_custom_color(k))
             self.custom_swatch_canvases[key] = canvas
             RoundedButton(picker_row, text="Choose…", style="Secondary.TButton",
-                          command=lambda k=key: self._pick_custom_color(k)).pack(side="left")
+                          command=lambda k=key: self._pick_custom_color(k),
+                          bg=self._card_bg).pack(side="left")
         self._draw_custom_swatches()
 
     def _build_glass_alpha_controls(self):
         """Slider for Frosted / Picom / Hypr — how see-through the window
         is. Floor stays high enough that text remains readable."""
         tk.Label(self.glass_alpha_frame, text="Translucency",
-                 font=(self.family, 10, "bold"), bg=theme.PANEL_BG,
+                 font=(self.family, 10, "bold"), bg=self._card_bg,
                  fg=theme.TEXT_PRIMARY).pack(anchor="w")
         tk.Label(self.glass_alpha_frame,
                  text="How much of the desktop shows through. Solid is fully opaque; "
                       "the left end stays readable — never fully transparent.",
-                 fg=theme.TEXT_MUTED, bg=theme.PANEL_BG, justify="left", wraplength=480,
+                 fg=theme.TEXT_MUTED, bg=self._card_bg, justify="left", wraplength=480,
                  font=(self.family, 9)).pack(anchor="w", pady=(2, 8))
-        row = tk.Frame(self.glass_alpha_frame, bg=theme.PANEL_BG)
+        row = tk.Frame(self.glass_alpha_frame, bg=self._card_bg)
         row.pack(fill="x")
         tk.Label(row, text="See-through", font=(self.family, 8),
-                 bg=theme.PANEL_BG, fg=theme.TEXT_MUTED).pack(side="left")
+                 bg=self._card_bg, fg=theme.TEXT_MUTED).pack(side="left")
         self.glass_alpha_label = tk.Label(row, text="", font=(self.family, 9, "bold"),
-                                          bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY)
+                                          bg=self._card_bg, fg=theme.TEXT_PRIMARY)
         self.glass_alpha_label.pack(side="right")
         tk.Label(row, text="Solid", font=(self.family, 8),
-                 bg=theme.PANEL_BG, fg=theme.TEXT_MUTED).pack(side="right", padx=(0, 12))
+                 bg=self._card_bg, fg=theme.TEXT_MUTED).pack(side="right", padx=(0, 12))
         lo = int(round(theme.WINDOW_ALPHA_MIN * 100))
         hi = int(round(theme.WINDOW_ALPHA_MAX * 100))
         self.glass_alpha_var = tk.DoubleVar(value=theme.get_glass_alpha() * 100)
         self.glass_alpha_scale = tk.Scale(
             self.glass_alpha_frame, from_=lo, to=hi, orient="horizontal",
             showvalue=0, resolution=1, length=360,
-            bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY, highlightthickness=0,
+            bg=self._card_bg, fg=theme.TEXT_PRIMARY, highlightthickness=0,
             troughcolor=theme.FIELD_BG, activebackground=theme.ACCENT,
             sliderrelief="flat", bd=0, command=self._on_glass_alpha)
         self.glass_alpha_scale.pack(fill="x", pady=(4, 0))
