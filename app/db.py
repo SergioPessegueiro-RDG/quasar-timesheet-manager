@@ -861,6 +861,29 @@ class Database:
             jira_worklog_id=r["jira_worklog_id"], date=r["date"],
         )
 
+    def is_pending_worklog_delete(self, worklog_id: str) -> bool:
+        needle = (worklog_id or "").strip()
+        if not needle:
+            return False
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM pending_worklog_deletes WHERE jira_worklog_id=? LIMIT 1",
+                (needle,),
+            )
+            return cur.fetchone() is not None
+
+    def get_time_entry_by_worklog_id(self, worklog_id: str) -> Optional[TimeEntry]:
+        needle = (worklog_id or "").strip()
+        if not needle:
+            return None
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT * FROM time_entries WHERE jira_worklog_id=? LIMIT 1",
+                (needle,),
+            )
+            r = cur.fetchone()
+        return self._row_to_entry(r) if r else None
+
     def get_time_entry(self, entry_id: int) -> Optional[TimeEntry]:
         with self._cursor() as cur:
             cur.execute("SELECT * FROM time_entries WHERE id=?", (entry_id,))

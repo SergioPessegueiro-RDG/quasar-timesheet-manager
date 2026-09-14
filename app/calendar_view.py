@@ -116,6 +116,7 @@ class CalendarGrid(tk.Frame):
                  open_duplicate: Optional[Callable[..., None]] = None,
                  initial_week_start: Optional[date] = None,
                  template_mode: bool = False,
+                 on_week_change: Optional[Callable[[date], None]] = None,
                  **kwargs):
         kwargs.setdefault("bg", theme.APP_BG)
         kwargs.setdefault("highlightthickness", 0)
@@ -126,6 +127,7 @@ class CalendarGrid(tk.Frame):
         self.open_time_block = open_time_block
         self.open_duplicate = open_duplicate
         self.template_mode = template_mode
+        self.on_week_change = on_week_change
         self.family = theme.resolve_font_family()
 
         if initial_week_start is not None:
@@ -194,6 +196,7 @@ class CalendarGrid(tk.Frame):
         self._build_widgets()
         self._drag_state = None
         self.refresh()
+        self._emit_week_change()
 
     # ------------------------------------------------------------------
     # Layout / widgets
@@ -712,15 +715,23 @@ class CalendarGrid(tk.Frame):
     def _prev_week(self):
         self.week_start -= timedelta(days=7)
         self.refresh()
+        self._emit_week_change()
 
     def _next_week(self):
         self.week_start += timedelta(days=7)
         self.refresh()
+        self._emit_week_change()
 
     def _go_today(self):
         today = date.today()
         self.week_start = today - timedelta(days=today.weekday())
         self.refresh()
+        self._emit_week_change()
+
+    def _emit_week_change(self):
+        if self.template_mode or self.on_week_change is None:
+            return
+        self.on_week_change(self.week_start)
 
     def day_date(self, day_idx: int) -> date:
         return self.week_start + timedelta(days=day_idx)

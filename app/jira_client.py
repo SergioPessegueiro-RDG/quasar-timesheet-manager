@@ -25,7 +25,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from . import config, update_check
 
@@ -469,6 +469,130 @@ def delete_worklog(creds: JiraCredentials, issue_key: str, worklog_id: str) -> N
     path = (f"/rest/api/2/issue/{urllib.parse.quote(issue_key)}"
             f"/worklog/{urllib.parse.quote(str(worklog_id))}")
     _request(creds, "DELETE", path)
+
+
+@dataclass
+class JiraWorklog:
+    """One worklog the current user logged on an issue."""
+    id: str
+    issue_key: str
+    started: str
+    time_spent_seconds: int
+    comment: str = ""
+
+
+def worklog_comment_text(comment: Any) -> str:
+    """Flatten a Jira worklog comment (plain string or ADF) to one line."""
+    if comment is None:
+        return ""
+    if isinstance(comment, str):
+        return " ".join(comment.split())
+    if not isinstance(comment, dict):
+        return " ".join(str(comment).split())
+    texts: List[str] = []
+
+    def walk(node: Any):
+        if isinstance(node, dict):
+            if node.get("type") == "text" and node.get("text"):
+                texts.append(str(node.get("text")))
+            for child in node.get("content") or []:
+                walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    walk(comment)
+    return " ".join(" ".join(texts).split())
+
+
+def parse_worklog_started(raw: str) -> Optional[datetime]:
+    """Parse Jira's worklog started stamp into an aware datetime."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+0000"
+    if len(text) >= 6 and text[-3] == ":" and text[-6] in "+-":
+        text = text[:-3] + text[-2:]
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def worklogs_in_range_jql(start_date: str, end_date: str) -> str:
+    """Issues the current user logged time on between these inclusive dates."""
+    return (
+        f'worklogAuthor = currentUser() AND worklogDate >= "{start_date}" '
+        f'AND worklogDate <= "{end_date}" ORDER BY updated DESC'
+    )
+
+
+def _worklog_is_mine(raw: dict, me: dict) -> bool:
+    author = raw.get("author") or {}
+    my_id = (me.get("accountId") or "").strip()
+    if my_id and (author.get("accountId") or "").strip() == my_id:
+        return True
+    my_email = (me.get("emailAddress") or "").strip().lower()
+    their_email = (author.get("emailAddress") or "").strip().lower()
+    return bool(my_email and their_email and my_email == their_email)
+
+
+def list_issue_worklogs(creds: JiraCredentials, issue_key: str) -> List[dict]:
+    key = (issue_key or "").strip()
+    if not key:
+        return []
+    out: List[dict] = []
+    start_at = 0
+    while True:
+        payload = _request(
+            creds, "GET",
+            f"/rest/api/2/issue/{urllib.parse.quote(key)}/worklog",
+            query={"startAt": str(start_at), "maxResults": str(_PAGE_SIZE)},
+        )
+        batch = payload.get("worklogs") or []
+        out.extend(batch)
+        total = int(payload.get("total") or 0)
+        start_at += max(len(batch), 1)
+        if not batch or start_at >= total:
+            break
+    return out
+
+
+def fetch_my_worklogs(
+    creds: JiraCredentials, start_date: str, end_date: str,
+) -> Tuple[List[JiraIssue], List[JiraWorklog]]:
+    """Read-only: this user's worklogs in [start_date, end_date]."""
+    me = _request(creds, "GET", "/rest/api/2/myself")
+    issues = _search_jql(creds, worklogs_in_range_jql(start_date, end_date), 100)
+    worklogs: List[JiraWorklog] = []
+    for issue in issues:
+        for raw in list_issue_worklogs(creds, issue.key):
+            if not isinstance(raw, dict) or not _worklog_is_mine(raw, me):
+                continue
+            started = parse_worklog_started(str(raw.get("started") or ""))
+            if started is None:
+                continue
+            local = started.astimezone(datetime.now().astimezone().tzinfo)
+            day = local.date().isoformat()
+            if day < start_date or day > end_date:
+                continue
+            worklog_id = str(raw.get("id") or "").strip()
+            seconds = int(raw.get("timeSpentSeconds") or 0)
+            if not worklog_id or seconds < 60:
+                continue
+            worklogs.append(JiraWorklog(
+                id=worklog_id,
+                issue_key=issue.key,
+                started=raw.get("started") or "",
+                time_spent_seconds=seconds,
+                comment=worklog_comment_text(raw.get("comment")),
+            ))
+    _log(f"fetch_my_worklogs {start_date}..{end_date} issues={len(issues)} "
+         f"worklogs={len(worklogs)}")
+    return issues, worklogs
 
 
 @dataclass

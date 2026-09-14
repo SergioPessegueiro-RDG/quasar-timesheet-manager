@@ -7,7 +7,7 @@ import time
 import tkinter as tk
 import traceback
 import webbrowser
-from datetime import date
+from datetime import date, timedelta
 from tkinter import messagebox, ttk
 from typing import Optional
 
@@ -106,6 +106,8 @@ class MainWindow(tk.Tk):
 
         self.family = theme.apply_theme(self)
         self.configure(bg=theme.APP_BG)
+        self._jira_sync_in_flight = False
+        self._worklog_pull_seq = 0
 
         self._build_menu()
         self._build_top_bar()
@@ -131,6 +133,53 @@ class MainWindow(tk.Tk):
         self._jira_sync_in_flight = False
         self.after(400, self._sync_qdms_on_startup)
         self.after(1500, self._check_for_updates)
+
+    def _pull_worklogs_for_week(self, week_start: date):
+        """Quietly import this user's Jira worklogs for the visible week.
+
+        So going back a week shows hours already logged in Jira, not just
+        blocks created in this app. Local rows and pending deletes win.
+        """
+        creds = self._jira_creds()
+        if not creds.is_complete():
+            return
+        start_date = week_start.isoformat()
+        end_date = (week_start + timedelta(days=config.week_end_offset())).isoformat()
+        self._worklog_pull_seq += 1
+        seq = self._worklog_pull_seq
+
+        def worker():
+            try:
+                issues, worklogs = jira_client.fetch_my_worklogs(
+                    creds, start_date, end_date)
+            except Exception as exc:
+                jira_client._log(
+                    f"fetch_my_worklogs {start_date}..{end_date} failed: "
+                    f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}")
+                return
+            self.after(
+                0,
+                lambda issues=issues, worklogs=worklogs, seq=seq,
+                week_start=week_start: self._apply_worklog_pull(
+                    seq, week_start, issues, worklogs))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_worklog_pull(self, seq: int, week_start: date, issues, worklogs):
+        if seq != self._worklog_pull_seq:
+            return
+        if not hasattr(self, "calendar") or self.calendar.week_start != week_start:
+            return
+        try:
+            result = jira_sync.pull_worklogs_into_db(self.db, issues, worklogs)
+        except Exception as exc:
+            jira_client._log(f"pull_worklogs_into_db failed: {exc}\n{traceback.format_exc()}")
+            return
+        if result.created:
+            self.calendar.refresh()
+            self._on_sidebar_change()
+            self._set_jira_busy(
+                False, f"Loaded {result.created} worklog(s) from Jira.", quiet=True)
 
     def _check_for_updates(self):
         """Best-effort, silent-on-failure check for a newer GitHub Release
@@ -637,6 +686,7 @@ class MainWindow(tk.Tk):
             open_time_block=self._open_time_block_panel,
             open_duplicate=self._open_duplicate_panel,
             initial_week_start=initial_week_start,
+            on_week_change=self._pull_worklogs_for_week,
         )
         self._place_sidebar_and_calendar(body, self.sidebar, self.calendar)
         self.sidebar.set_calendar(self.calendar)

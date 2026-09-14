@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import jira_client, jira_sync
+from app import config, jira_client, jira_sync
 from app.db import Database
 from app.models import Activity, Project, TimeEntry
 
@@ -398,6 +398,86 @@ class TestPushWorklogs(unittest.TestCase):
         entry.id = None
         self.db.add_time_entry(entry)
         self.assertEqual(self.db.list_pending_worklog_deletes(), [])
+
+
+class TestPullWorklogs(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.db = Database(os.path.join(self.tmpdir, "test.db"))
+        pid = self.db.add_project(Project(None, "Platform", "#4C6EF5"))
+        self.db.add_activity(Activity(
+            None, "Write sync", "QDM-42", project_id=pid))
+        self.issue = jira_client.JiraIssue(
+            "QDM-42", "Write sync", "Story", "QDM",
+            "Quasar Delivery Management", "In Progress")
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_worklog_comment_flattens_adf(self):
+        adf = {"type": "doc", "content": [
+            {"type": "paragraph", "content": [
+                {"type": "text", "text": "hooked up"},
+                {"type": "text", "text": " the API"},
+            ]}
+        ]}
+        self.assertEqual(jira_client.worklog_comment_text(adf), "hooked up the API")
+        self.assertEqual(jira_client.worklog_comment_text("  plain  note "), "plain note")
+
+    def test_range_jql_is_this_user_and_dates(self):
+        jql = jira_client.worklogs_in_range_jql("2026-09-07", "2026-09-11")
+        self.assertIn("worklogAuthor = currentUser()", jql)
+        self.assertIn('worklogDate >= "2026-09-07"', jql)
+        self.assertIn('worklogDate <= "2026-09-11"', jql)
+
+    def test_slot_from_started_and_duration(self):
+        stamp = jira_client.worklog_started("2026-07-20", "09:00")
+        slot = jira_sync.worklog_to_local_slot(jira_client.JiraWorklog(
+            "10001", "QDM-42", stamp, 7200, "notes"))
+        self.assertEqual(slot[0], "2026-07-20")
+        self.assertEqual(slot[1], "09:00")
+        self.assertEqual(slot[2], "11:00")
+
+    def test_midnight_start_snaps_to_workday(self):
+        stamp = jira_client.worklog_started("2026-07-20", "00:00")
+        slot = jira_sync.worklog_to_local_slot(jira_client.JiraWorklog(
+            "10001", "QDM-42", stamp, 3600, ""))
+        self.assertEqual(slot[1], f"{config.START_HOUR:02d}:00")
+
+    def test_pull_creates_synced_block(self):
+        stamp = jira_client.worklog_started("2026-07-20", "09:00")
+        result = jira_sync.pull_worklogs_into_db(
+            self.db, [self.issue],
+            [jira_client.JiraWorklog("10001", "QDM-42", stamp, 7200, "from jira")])
+        self.assertEqual(result.created, 1)
+        entries = self.db.list_time_entries_for_week(["2026-07-20"])
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual(entry.jira_worklog_id, "10001")
+        self.assertEqual(entry.notes, "from jira")
+        self.assertEqual(entry.start_time, "09:00")
+        self.assertEqual(entry.end_time, "11:00")
+        self.assertEqual(
+            entry.jira_worklog_fingerprint, jira_sync.worklog_fingerprint(entry))
+
+    def test_pull_skips_worklog_already_on_calendar(self):
+        stamp = jira_client.worklog_started("2026-07-20", "09:00")
+        wl = jira_client.JiraWorklog("10001", "QDM-42", stamp, 7200, "from jira")
+        jira_sync.pull_worklogs_into_db(self.db, [self.issue], [wl])
+        again = jira_sync.pull_worklogs_into_db(self.db, [self.issue], [wl])
+        self.assertEqual(again.created, 0)
+        self.assertEqual(again.skipped, 1)
+        self.assertEqual(len(self.db.list_time_entries_for_week(["2026-07-20"])), 1)
+
+    def test_pull_does_not_resurrect_pending_delete(self):
+        stamp = jira_client.worklog_started("2026-07-20", "09:00")
+        wl = jira_client.JiraWorklog("10001", "QDM-42", stamp, 7200, "from jira")
+        jira_sync.pull_worklogs_into_db(self.db, [self.issue], [wl])
+        entry = self.db.list_time_entries_for_week(["2026-07-20"])[0]
+        self.db.delete_time_entry(entry.id)
+        again = jira_sync.pull_worklogs_into_db(self.db, [self.issue], [wl])
+        self.assertEqual(again.created, 0)
+        self.assertEqual(self.db.list_time_entries_for_week(["2026-07-20"]), [])
 
 
 class TestJiraHttp(unittest.TestCase):

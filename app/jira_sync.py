@@ -8,6 +8,7 @@ two functions: sync_issues_into_db and push_worklogs.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import List, Optional
 
 from . import config, jira_client
@@ -70,6 +71,7 @@ def sync_issues_into_db(
     archive_closed_missing: bool = True,
     open_capped: bool = False,
     closed_capped: bool = False,
+    collapse_projects: bool = True,
 ) -> SyncResult:
     """Create/update Activities (and their Projects) from Jira issues.
 
@@ -172,7 +174,8 @@ def sync_issues_into_db(
             act.archived = True
             db.update_activity(act)
 
-    db.collapse_all_projects()
+    if collapse_projects:
+        db.collapse_all_projects()
     return result
 
 
@@ -201,6 +204,96 @@ def worklog_fingerprint(entry: TimeEntry) -> str:
         str(seconds),
         worklog_comment_sent(entry),
     ))
+
+
+def _hhmm_plus_minutes(start_hhmm: str, minutes: int) -> str:
+    sh, sm = (int(x) for x in start_hhmm.split(":"))
+    total = sh * 60 + sm + max(0, minutes)
+    total = min(total, 23 * 60 + 59)
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def worklog_to_local_slot(worklog: jira_client.JiraWorklog) -> Optional[tuple]:
+    """Map a Jira worklog onto a calendar date + start/end.
+
+    Midnight starts (common when Jira only stored a date) are snapped to
+    the visible workday start so the block actually appears on the grid.
+    """
+    started = jira_client.parse_worklog_started(worklog.started)
+    if started is None:
+        return None
+    local = started.astimezone(datetime.now().astimezone().tzinfo)
+    date_str = local.date().isoformat()
+    hour, minute = local.hour, local.minute
+    if hour == 0 and minute == 0:
+        start_time = f"{config.START_HOUR:02d}:00"
+    else:
+        start_time = f"{hour:02d}:{minute:02d}"
+    duration = max(1, int(round(worklog.time_spent_seconds / 60)))
+    end_time = _hhmm_plus_minutes(start_time, duration)
+    if end_time <= start_time:
+        return None
+    return date_str, start_time, end_time, duration
+
+
+@dataclass
+class PullResult:
+    created: int = 0
+    skipped: int = 0
+
+
+def pull_worklogs_into_db(
+    db: Database,
+    issues: List[jira_client.JiraIssue],
+    worklogs: List[jira_client.JiraWorklog],
+) -> PullResult:
+    """Import Jira worklogs that aren't already on the calendar.
+
+    Local edits win: an existing row with that worklog id is left alone,
+    and a worklog queued for delete is not resurrected. New rows are
+    marked synced so the next Push skips them unless you change them.
+    """
+    if issues:
+        sync_issues_into_db(
+            db, issues,
+            archive_open_missing=False,
+            archive_closed_missing=False,
+            collapse_projects=False,
+        )
+    result = PullResult()
+    for worklog in worklogs:
+        wid = (worklog.id or "").strip()
+        key = (worklog.issue_key or "").strip()
+        if not wid or not key:
+            continue
+        if db.get_time_entry_by_worklog_id(wid) is not None:
+            result.skipped += 1
+            continue
+        if db.is_pending_worklog_delete(wid):
+            result.skipped += 1
+            continue
+        slot = worklog_to_local_slot(worklog)
+        if slot is None:
+            result.skipped += 1
+            continue
+        date_str, start_time, end_time, _duration = slot
+        act = db.get_activity_by_jira_key(key)
+        if act is None:
+            result.skipped += 1
+            continue
+        notes = " ".join((worklog.comment or "").split())
+        entry = TimeEntry(
+            None, act.id, act.name, key, act.color,
+            date_str, start_time, end_time, notes,
+            jira_project=act.jira_project, issue_type=act.issue_type,
+            jira_worklog_id=wid, jira_worklog_issue=key,
+        )
+        entry.jira_worklog_fingerprint = worklog_fingerprint(entry)
+        entry_id = db.add_time_entry(entry)
+        db.mark_time_entry_worklog_synced(
+            entry_id, wid, key, entry.jira_worklog_fingerprint)
+        result.created += 1
+    return result
 
 
 def classify_worklog_push(entry: TimeEntry) -> PushAction:
