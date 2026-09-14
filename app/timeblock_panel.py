@@ -17,6 +17,7 @@ from typing import Callable, List, Optional
 from . import config, theme
 from .jira_client import preferred_close_transition
 from .models import Activity
+from .sidebar import qdm_combo_rows
 from .widgets import RoundedButton, RoundedCombobox, ScrollArea, show_saved_toast
 
 # Shown at the end of the Jira Project dropdown as a way to add a value
@@ -110,7 +111,7 @@ class TimeBlockPanel(tk.Frame):
         ttk.Label(frm, text="QDM").grid(row=row, column=0, sticky="w", pady=4)
         self.activity_var = tk.StringVar()
         self.activity_combo = RoundedCombobox(frm, textvariable=self.activity_var,
-                                               state="readonly", width=30)
+                                               state="readonly", width=30, filterable=True)
         self.activity_combo.grid(row=row, column=1, columnspan=2, sticky="ew", pady=4)
         self.activity_combo.bind("<<ComboboxSelected>>", self._on_activity_changed)
         self.activity_combo.bind("<Return>", lambda e: self._save())
@@ -404,8 +405,14 @@ class TimeBlockPanel(tk.Frame):
         self.day_label_by_key = {key: label for label, key in day_options}
         self.day_combo.config(values=self.day_labels)
 
-        activity_names = [a.name for a in activities] or ["(no QDM's yet)"]
-        self.activity_combo.config(values=activity_names)
+        activity_names, activity_hays, activity_labels = qdm_combo_rows(activities)
+        if not activity_names:
+            activity_names = ["(no QDM's yet)"]
+            activity_hays = [""]
+            activity_labels = activity_names
+        self.activity_combo.config(
+            values=activity_names, filter_haystacks=activity_hays,
+            value_labels=activity_labels)
 
         self.time_options = []
         t = start_hour * 60

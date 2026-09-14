@@ -18,7 +18,7 @@ looking modern while buttons and panels stayed sharp-cornered.
 import os
 import tkinter as tk
 import tkinter.font as tkfont
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from . import theme
 
@@ -352,17 +352,27 @@ class RoundedCombobox(tk.Frame):
     is configured -- that's the box around the Timer's QDM picker. This
     keeps the slice of the Combobox API this app actually uses
     (textvariable, values, state, set/get/current/config/cget/bind, and
-    <<ComboboxSelected>>).
+    <<ComboboxSelected>>). `filterable=True` adds a search field on the
+    open list so a long QDM list can be narrowed by name or ticket number.
     """
 
     def __init__(self, master, textvariable=None, values=(), state="readonly",
-                 width=20, style: str = "", **kwargs):
+                 width=20, style: str = "", filterable: bool = False,
+                 filter_haystacks=(), value_labels=(), **kwargs):
         kwargs.pop("style", None)
         bg = kwargs.pop("bg", None) or _parent_bg(master)
         kwargs.setdefault("highlightthickness", 0)
         super().__init__(master, bg=bg, **kwargs)
         self._parent_bg = bg
         self._values = list(values)
+        self._filter_haystacks = list(filter_haystacks or ())
+        self._value_labels = list(value_labels or ())
+        self._filterable = bool(filterable)
+        self._visible_indices: List[int] = list(range(len(self._values)))
+        self._filter_var = tk.StringVar()
+        self._filter_entry: Optional[tk.Entry] = None
+        self._filter_trace = self._filter_var.trace_add(
+            "write", lambda *_: self._refilter_popup())
         self._state = state or "readonly"
         self._char_width = int(width) if width else 20
         self._variable = textvariable if textvariable is not None else tk.StringVar()
@@ -396,6 +406,8 @@ class RoundedCombobox(tk.Frame):
         self.bind("<Down>", lambda e: self._open_popup() or "break")
         self.bind("<space>", lambda e: self._open_popup() or "break")
         self.bind("<Escape>", lambda e: self._close_popup() or "break")
+        self.bind("<Key>", self._on_typeahead)
+        self._canvas.bind("<Key>", self._on_typeahead)
         self.bind("<Destroy>", lambda e: self._close_popup())
         # Close the popup on outside clicks without unbind_all, which
         # would strip unrelated Button-1 handlers across the app.
@@ -428,6 +440,13 @@ class RoundedCombobox(tk.Frame):
     def configure(self, **kwargs):  # type: ignore[override]
         if "values" in kwargs:
             self._values = list(kwargs.pop("values") or ())
+            self._visible_indices = list(range(len(self._values)))
+        if "filter_haystacks" in kwargs:
+            self._filter_haystacks = list(kwargs.pop("filter_haystacks") or ())
+        if "value_labels" in kwargs:
+            self._value_labels = list(kwargs.pop("value_labels") or ())
+        if "filterable" in kwargs:
+            self._filterable = bool(kwargs.pop("filterable"))
         if "state" in kwargs:
             self._state = kwargs.pop("state") or "readonly"
         if "textvariable" in kwargs:
@@ -490,6 +509,58 @@ class RoundedCombobox(tk.Frame):
         fg = theme.TEXT_MUTED if disabled else theme.TEXT_PRIMARY
         return fill, fg
 
+    def _matching_indices(self, query: str) -> List[int]:
+        """Indices into `_values` whose label/haystack contains `query`."""
+        q = (query or "").strip().lower()
+        if not q:
+            return list(range(len(self._values)))
+        digits = "".join(c for c in q if c.isdigit())
+        out: List[int] = []
+        for i, value in enumerate(self._values):
+            hay = self._filter_haystacks[i] if i < len(self._filter_haystacks) else ""
+            label = self._row_text(i)
+            blob = f"{value}\n{label}\n{hay}".lower()
+            if q in blob or (digits and digits in blob):
+                out.append(i)
+        return out
+
+    def _row_text(self, index: int) -> str:
+        if 0 <= index < len(self._value_labels) and str(self._value_labels[index] or "").strip():
+            return str(self._value_labels[index])
+        if 0 <= index < len(self._values):
+            return str(self._values[index])
+        return ""
+
+    def _on_typeahead(self, event):
+        if not self._filterable or self._state == "disabled":
+            return
+        if event.state & 0x4:  # Control
+            return
+        if event.keysym in (
+            "Up", "Down", "Return", "Escape", "Tab", "Shift_L", "Shift_R",
+            "Control_L", "Control_R", "Alt_L", "Meta_L", "Caps_Lock",
+            "Left", "Right", "Home", "End",
+        ):
+            return
+        if self._popup is not None:
+            return
+        ch = event.char or ""
+        if event.keysym == "BackSpace":
+            seed = ""
+        elif len(ch) == 1 and ch.isprintable():
+            seed = ch
+        else:
+            return
+        self._open_popup()
+        self._filter_var.set(seed)
+        entry = self._filter_entry
+        if entry is not None:
+            try:
+                entry.icursor("end")
+            except tk.TclError:
+                pass
+        return "break"
+
     def _redraw(self):
         c = self._canvas
         try:
@@ -524,7 +595,8 @@ class RoundedCombobox(tk.Frame):
         # *right* edge so a picker in the top-right toolbar grows left
         # into the window instead of clipping to the remaining 8px of
         # margin (which is why names were ending in "…").
-        text_w = max((self._tkfont.measure(str(v)) for v in self._values), default=0) + 36
+        label_iter = (self._row_text(i) for i in range(len(self._values)))
+        text_w = max((self._tkfont.measure(str(v)) for v in label_iter), default=0) + 36
         field_w = max(int(self.winfo_width()), self._min_width)
         try:
             max_w = max(220, int(root.winfo_width()) - 24)
@@ -535,7 +607,8 @@ class RoundedCombobox(tk.Frame):
         rows_vis = min(max(len(self._values), 1), 10)
         row_h = int(self._tkfont.metrics("linespace") + 12)
         self._popup_row_h = row_h
-        height = rows_vis * row_h + 8
+        filter_h = 34 if self._filterable else 0
+        height = filter_h + rows_vis * row_h + 8
 
         radius = 8
         inset = radius
@@ -578,11 +651,32 @@ class RoundedCombobox(tk.Frame):
         card.place(x=local_x, y=local_y, width=outer_w, height=outer_h)
         card.lift()
 
+        self._filter_entry = None
+        self._filter_var.set("")
+        if self._filterable:
+            filter_wrap = tk.Frame(card.body, bg=theme.FIELD_BG)
+            filter_wrap.pack(side="top", fill="x", padx=2, pady=(0, 4))
+            entry = tk.Entry(
+                filter_wrap, textvariable=self._filter_var,
+                font=self._tkfont, relief="flat", bd=0,
+                bg=theme.SURFACE, fg=theme.TEXT_PRIMARY,
+                insertbackground=theme.TEXT_PRIMARY, highlightthickness=1,
+                highlightbackground=theme.BORDER, highlightcolor=theme.ACCENT,
+            )
+            entry.pack(fill="x", ipady=3, padx=2)
+            entry.bind("<Down>", lambda e: self._move_popup_active(1))
+            entry.bind("<Up>", lambda e: self._move_popup_active(-1))
+            entry.bind("<Return>", self._on_pick)
+            entry.bind("<Escape>", lambda e: self._close_popup() or "break")
+            self._filter_entry = entry
+
+        list_h = max(row_h, height - filter_h)
         canvas = tk.Canvas(
-            card.body, width=width, height=height, bg=theme.FIELD_BG,
+            card.body, width=width, height=list_h, bg=theme.FIELD_BG,
             highlightthickness=0, borderwidth=0,
         )
-        inner_h = max(len(self._values), 1) * row_h + 8
+        self._visible_indices = self._matching_indices(self._filter_var.get())
+        inner_h = max(len(self._visible_indices), 1) * row_h + 8
         canvas.configure(
             scrollregion=(0, 0, width, inner_h),
             yscrollincrement=row_h,
@@ -595,20 +689,72 @@ class RoundedCombobox(tk.Frame):
 
         self._popup = card
         self._popup_canvas = canvas
-        self._popup_active = self.current()
         self._popup_width = width
+        current = self.current()
+        self._popup_active = (
+            self._visible_indices.index(current) if current in self._visible_indices else 0
+        )
 
         canvas.bind("<Motion>", self._on_popup_motion)
         canvas.bind("<ButtonRelease-1>", self._on_pick)
         canvas.bind("<Return>", self._on_pick)
         canvas.bind("<Escape>", lambda e: self._close_popup())
+        canvas.bind("<Down>", lambda e: self._move_popup_active(1))
+        canvas.bind("<Up>", lambda e: self._move_popup_active(-1))
         card.bind("<Escape>", lambda e: self._close_popup())
 
         self._redraw_popup_rows()
         try:
-            canvas.focus_set()
+            if self._filter_entry is not None:
+                self._filter_entry.focus_set()
+            else:
+                canvas.focus_set()
         except tk.TclError:
             pass
+
+    def _popup_inner_height(self) -> int:
+        return max(len(self._visible_indices), 1) * self._popup_row_h + 8
+
+    def _refilter_popup(self):
+        if self._popup is None or self._popup_canvas is None:
+            return
+        self._visible_indices = self._matching_indices(self._filter_var.get())
+        if self._visible_indices:
+            self._popup_active = min(max(self._popup_active, 0), len(self._visible_indices) - 1)
+        else:
+            self._popup_active = -1
+        c = self._popup_canvas
+        inner_h = self._popup_inner_height()
+        w = int(getattr(self, "_popup_width", 0) or 200)
+        try:
+            c.configure(scrollregion=(0, 0, w, inner_h))
+            c.yview_moveto(0)
+        except tk.TclError:
+            pass
+        self._redraw_popup_rows()
+
+    def _move_popup_active(self, delta: int):
+        if not self._visible_indices:
+            return "break"
+        nxt = self._popup_active + delta
+        if self._popup_active < 0:
+            nxt = 0 if delta > 0 else len(self._visible_indices) - 1
+        self._popup_active = max(0, min(len(self._visible_indices) - 1, nxt))
+        self._redraw_popup_rows()
+        c = self._popup_canvas
+        if c is not None:
+            try:
+                row_top = 4 + self._popup_active * self._popup_row_h
+                view_top = c.canvasy(0)
+                view_h = int(c.winfo_height() or 1)
+                row_bot = row_top + self._popup_row_h
+                if row_top < view_top:
+                    c.yview_moveto(max(0.0, row_top / self._popup_inner_height()))
+                elif row_bot > view_top + view_h:
+                    c.yview_moveto(max(0.0, (row_bot - view_h) / self._popup_inner_height()))
+            except tk.TclError:
+                pass
+        return "break"
 
     def _fit_popup_text(self, text: str, max_px: int) -> str:
         if self._tkfont.measure(text) <= max_px:
@@ -626,13 +772,18 @@ class RoundedCombobox(tk.Frame):
         w = int(getattr(self, "_popup_width", 0) or c.winfo_width() or 200)
         max_text = max(40, w - 20)
         current = self.current()
-        for i, value in enumerate(self._values):
-            y0 = 4 + i * self._popup_row_h
+        if not self._visible_indices:
+            c.create_text(
+                12, 4 + self._popup_row_h / 2, text="No matching QDMs",
+                fill=theme.TEXT_MUTED, font=self._tkfont, anchor="w", tags="row")
+            return
+        for vis_i, val_i in enumerate(self._visible_indices):
+            y0 = 4 + vis_i * self._popup_row_h
             y1 = y0 + self._popup_row_h
-            if i == self._popup_active:
+            if vis_i == self._popup_active:
                 fill = theme.ACCENT
                 fg = "#FFFFFF"
-            elif i == current:
+            elif val_i == current:
                 fill = theme.ACCENT_SOFT
                 fg = theme.ACCENT
             else:
@@ -644,7 +795,8 @@ class RoundedCombobox(tk.Frame):
                     radius=8, fill=fill, outline="",
                     background=theme.FIELD_BG, tags="row")
             c.create_text(
-                12, (y0 + y1) / 2, text=self._fit_popup_text(str(value), max_text),
+                12, (y0 + y1) / 2,
+                text=self._fit_popup_text(self._row_text(val_i), max_text),
                 fill=fg, font=self._tkfont, anchor="w", tags="row")
 
     def _popup_index_at(self, y: float) -> Optional[int]:
@@ -653,7 +805,7 @@ class RoundedCombobox(tk.Frame):
             return None
         y = float(c.canvasy(y))
         idx = int((y - 4) // self._popup_row_h)
-        if 0 <= idx < len(self._values):
+        if 0 <= idx < len(self._visible_indices):
             return idx
         return None
 
@@ -717,18 +869,23 @@ class RoundedCombobox(tk.Frame):
 
     def _on_pick(self, event=None):
         if self._popup is None:
-            return
+            return "break"
         idx = self._popup_active
-        if event is not None and hasattr(event, "y"):
+        if (event is not None
+                and getattr(event, "widget", None) is self._popup_canvas
+                and hasattr(event, "y")):
             hit = self._popup_index_at(event.y)
             if hit is not None:
                 idx = hit
-        if idx is not None and 0 <= idx < len(self._values):
-            self._variable.set(self._values[idx])
+        if idx is not None and 0 <= idx < len(self._visible_indices):
+            self._variable.set(self._values[self._visible_indices[idx]])
             self._close_popup()
             self.event_generate("<<ComboboxSelected>>")
+        elif not self._visible_indices:
+            return "break"
         else:
             self._close_popup()
+        return "break"
 
     def _on_any_click(self, event):
         try:
@@ -761,6 +918,7 @@ class RoundedCombobox(tk.Frame):
         popup = self._popup
         self._popup = None
         self._popup_canvas = None
+        self._filter_entry = None
         self._listbox = None
         if popup is not None:
             try:

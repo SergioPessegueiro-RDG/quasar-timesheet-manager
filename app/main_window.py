@@ -340,6 +340,9 @@ class MainWindow(tk.Tk):
         file_menu.add_command(label="Push hours to Jira…", command=self._open_export_dialog)
         file_menu.add_command(label="Export to Jira CSV…", command=self._open_export_dialog)
         file_menu.add_separator()
+        file_menu.add_command(label="New QDM…", command=self._add_qdm)
+        file_menu.add_command(label="New Project…", command=self._add_project)
+        file_menu.add_separator()
         file_menu.add_command(label="Backup & Restore…", command=self._open_backup_dialog)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_close)
@@ -822,6 +825,28 @@ class MainWindow(tk.Tk):
         if hasattr(self, "template_tab") and current == str(self.template_tab):
             return self.template_calendar
         return None
+
+    def _active_sidebar(self):
+        """Sidebar for the visible Timesheet/Template tab, else Timesheet's."""
+        if not hasattr(self, "notebook"):
+            return getattr(self, "sidebar", None)
+        try:
+            current = self.notebook.select()
+        except tk.TclError:
+            current = None
+        if current and hasattr(self, "template_tab") and current == str(self.template_tab):
+            return getattr(self, "template_sidebar", None)
+        return getattr(self, "sidebar", None)
+
+    def _add_qdm(self):
+        sb = self._active_sidebar()
+        if sb is not None:
+            sb._add_activity()
+
+    def _add_project(self):
+        sb = self._active_sidebar()
+        if sb is not None:
+            sb._add_project()
 
     def _on_tab_changed(self, event=None):
         self._refresh_tab_bar()
@@ -1573,10 +1598,9 @@ class MainWindow(tk.Tk):
             "• Click an activity in the sidebar to \"arm\" it, then click an "
             "empty slot to instantly place it (Esc cancels).\n"
             "• Double-click or right-click an activity to edit/delete it.\n"
-            "• \"+ Project\" groups activities into a collapsible project, "
-            "which sets the color every one of its activities' time blocks "
-            "shows -- click the arrow to collapse/expand, or right-click a "
-            "project to edit/delete it.\n"
+            "• File → New QDM / New Project adds a local activity or group "
+            "when you need something that isn't in Jira. A project sets the "
+            "color for its time blocks — right-click a project to edit it.\n"
             "• File → Sync QDMs from Jira… pulls open issues into the sidebar "
             "(needs a token in Settings). File → Push hours to Jira… logs "
             "the week's blocks as worklogs on those issues — CSV export is "

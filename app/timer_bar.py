@@ -19,6 +19,7 @@ from typing import Callable, List, Optional
 from . import theme
 from .db import Database
 from .models import Activity, TimeEntry
+from .sidebar import qdm_combo_rows
 from .time_rounding import round_duration_minutes
 from .widgets import RoundedButton, RoundedCombobox
 
@@ -48,7 +49,8 @@ class TimerBar(tk.Frame):
 
         self.activity_var = tk.StringVar()
         self.activity_combo = RoundedCombobox(inner, textvariable=self.activity_var,
-                                               state="readonly", width=22, bg=bg)
+                                               state="readonly", width=22, bg=bg,
+                                               filterable=True)
         self.activity_combo.pack(side="left", padx=(0, 8))
 
         # Fixed character width so Start Timer / Stop Timer don't nudge
@@ -89,7 +91,9 @@ class TimerBar(tk.Frame):
     def refresh_activities(self):
         self._activities = self.get_activities()
         self._activities_by_name = {a.name: a for a in self._activities}
-        self.activity_combo.config(values=[a.name for a in self._activities])
+        names, hays, labels = qdm_combo_rows(self._activities)
+        self.activity_combo.config(
+            values=names, filter_haystacks=hays, value_labels=labels)
         # A placeholder rather than leaving the combobox showing nothing
         # at all -- an empty readonly Combobox is easy to mistake for an
         # inert/disabled control instead of one that needs a click. Only

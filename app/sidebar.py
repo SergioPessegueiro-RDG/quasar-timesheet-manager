@@ -43,6 +43,19 @@ def qdm_matches(activity: Activity, query: str) -> bool:
     return bool(digits) and digits in hay
 
 
+def qdm_combo_rows(activities: List[Activity]):
+    """Names, search haystacks, and 'KEY  name' labels for a QDM dropdown."""
+    names: List[str] = []
+    hays: List[str] = []
+    labels: List[str] = []
+    for act in activities:
+        names.append(act.name)
+        hays.append(qdm_haystack(act))
+        key = (act.jira_key or "").strip()
+        labels.append(f"{key}  {act.name}" if key else act.name)
+    return names, hays, labels
+
+
 class Sidebar(tk.Frame):
     def __init__(self, master, db: Database, on_change: Callable[[], None],
                  open_activity_panel: Callable[..., None],
@@ -160,16 +173,12 @@ class Sidebar(tk.Frame):
             if self.on_toggle_collapse is not None:
                 RoundedButton(header, text="«", width=3, style="Nav.TButton", compact=True,
                               command=self.on_toggle_collapse).pack(side="right")
-            RoundedButton(header, text="+ QDM", style="Accent.TButton", command=self._add_activity).pack(
-                side="right", padx=(0, 6))
-            RoundedButton(header, text="+ Project", style="Secondary.TButton", command=self._add_project).pack(
-                side="right", padx=(0, 6))
+            if self.on_jira_sync is not None:
+                RoundedButton(header, text="Sync", style="Accent.TButton",
+                              command=self.on_jira_sync).pack(side="right", padx=(0, 6))
 
             search_row = tk.Frame(inner, bg=theme.PANEL_BG)
             search_row.pack(fill="x", pady=(0, 10))
-            if self.on_jira_sync is not None:
-                RoundedButton(search_row, text="Sync", style="Accent.TButton",
-                              command=self.on_jira_sync).pack(side="right", padx=(8, 0))
             # shrink=True: this card is packed fill="x", so `.body` must
             # pack (not place) or the field collapses to 0px tall.
             search_card = RoundedCard(
@@ -377,7 +386,7 @@ class Sidebar(tk.Frame):
             return
 
         if not self._activities or not any(not a.is_closed() for a in self._activities):
-            empty = tk.Label(self.list_frame, text="No QDM's yet. Click “+ QDM”.",
+            empty = tk.Label(self.list_frame, text="No QDM's yet. Sync from Jira, or File → New QDM.",
                       fg=theme.TEXT_MUTED, bg=theme.PANEL_BG,
                       font=(self.family, 9), justify="left")
             empty.pack(pady=14, padx=8)

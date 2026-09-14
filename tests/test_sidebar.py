@@ -6,7 +6,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.models import Activity
-from app.sidebar import qdm_matches, qdm_haystack
+from app.sidebar import qdm_matches, qdm_haystack, qdm_combo_rows
 
 
 class TestQdmMatches(unittest.TestCase):
@@ -36,6 +36,12 @@ class TestQdmMatches(unittest.TestCase):
         self.assertIn("png", hay)
         self.assertIn("qdm-1842", hay)
         self.assertIn("1842", hay)
+
+    def test_combo_rows_include_key_label(self):
+        names, hays, labels = qdm_combo_rows([self.act])
+        self.assertEqual(names, ["Journey Call - PNG Fix"])
+        self.assertEqual(labels, ["QDM-1842  Journey Call - PNG Fix"])
+        self.assertIn("1842", hays[0])
 
 
 class TestSearchFilterInPlace(unittest.TestCase):

@@ -149,6 +149,18 @@ class TestRoundedWidgets(unittest.TestCase):
             combo.config(state="disabled")
             self.assertEqual(str(combo.cget("state")), "disabled")
 
+            from app.models import Activity
+            from app.sidebar import qdm_haystack
+            act = Activity(1, "PNG Fix", jira_key="QDM-1842")
+            searchable = RoundedCombobox(
+                root, values=["PNG Fix"], filterable=True,
+                filter_haystacks=[qdm_haystack(act)],
+                value_labels=["QDM-1842  PNG Fix"])
+            self.assertEqual(searchable._matching_indices(""), [0])
+            self.assertEqual(searchable._matching_indices("1842"), [0])
+            self.assertEqual(searchable._matching_indices("png"), [0])
+            self.assertEqual(searchable._matching_indices("railcard"), [])
+
             painted = RoundedCard(
                 root, bg="#ABCDEF", radius=8, outline=False, outer_bg="#654321")
             self.assertEqual(str(painted.cget("bg")).upper(), "#654321")
