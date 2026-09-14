@@ -100,6 +100,6 @@ if sys.platform == "darwin":
             "NSHighResolutionCapable": True,
             "CFBundleShortVersionString": "1.0.0",
             "CFBundleVersion": "1.0.0",
-            "NSHumanReadableCopyright": "",
+            "NSHumanReadableCopyright": "Alex Rae and Sérgio Pessegueiro",
         },
     )

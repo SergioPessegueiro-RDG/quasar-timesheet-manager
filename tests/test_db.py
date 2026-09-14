@@ -118,6 +118,14 @@ class TestDatabase(unittest.TestCase):
         updated = self.db.get_activity(aid)
         self.assertEqual(updated.name, "Design Review v2")
 
+        act.jira_status = "Closed"
+        act.jira_status_category = "done"
+        self.db.update_activity(act)
+        closed = self.db.get_activity(aid)
+        self.assertEqual(closed.jira_status, "Closed")
+        self.assertEqual(closed.jira_status_category, "done")
+        self.assertTrue(closed.is_closed())
+
         self.db.delete_activity(aid)
         self.assertIsNone(self.db.get_activity(aid))
 
@@ -222,6 +230,10 @@ class TestDatabase(unittest.TestCase):
         entry = self.db.get_time_entry(eid)
         self.assertEqual(entry.jira_project, "Quasar Delivery Management")
         self.assertEqual(entry.issue_type, "Sub-task")
+        self.assertIsNone(entry.jira_worklog_id)
+
+        self.db.set_time_entry_worklog_id(eid, "555")
+        self.assertEqual(self.db.get_time_entry(eid).jira_worklog_id, "555")
 
         # Renaming the activity's Jira project/issue type should cascade,
         # same as name/jira_key/color already do.
@@ -459,6 +471,8 @@ class TestDatabase(unittest.TestCase):
             self.assertEqual(act.name, "Legacy Activity")
             self.assertIsNone(act.jira_project)
             self.assertIsNone(act.issue_type)
+            self.assertIsNone(act.jira_status)
+            self.assertIsNone(act.jira_status_category)
             # The orphaned activity (no project_id column existed yet) gets
             # swept into "General" by _ensure_activities_have_projects.
             self.assertIsNotNone(act.project_id)

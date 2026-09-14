@@ -1,5 +1,6 @@
 """
-Modern visual theme: eighteen curated color palettes, a dynamic "Match
+Modern visual theme: curated color palettes (Figma moods plus Places and
+Atmosphere, TickTick-style scenic cards), a dynamic "Match
 System Appearance" theme, and a fully custom one, font resolution, ttk
 styling, and canvas drawing helpers (rounded rects, logo mark,
 theme-swatch previews) shared across the app.
@@ -14,10 +15,11 @@ Frame/Label/Canvas cache their bg/fg at construction time and need to be
 rebuilt -- see MainWindow._apply_theme_and_rebuild).
 
 This used to be a hand-tuned set of seven palettes, each with all ~24
-colors picked independently. It's now eighteen palettes -- inspired by
+colors picked independently. It's now a larger set -- inspired by
 the mood categories (Monochromatic, Romantic, Playful, Vibrant, Neutral,
 Tranquil, Seasonal) on Figma's "100 color combinations" resource
-(figma.com/resource-library/color-combinations) -- plus "Match System
+(figma.com/resource-library/color-combinations), plus Places and
+Atmosphere palettes in the spirit of TickTick's scenic theme cards -- plus "Match System
 Appearance", which follows the OS's light/dark setting instead of being
 hand-picked, and a "Custom" entry the user builds themselves from a
 color picker (see panels.SettingsPanel's custom-color row). Rather than hand-picking all
@@ -33,6 +35,7 @@ actually had (verified by measuring them before writing this).
 import math
 import subprocess
 import sys
+import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
 
@@ -75,6 +78,12 @@ def _is_dark(color: str) -> bool:
     r, g, b = _hex_to_rgb(color)
     luminance = 0.299 * r + 0.587 * g + 0.114 * b
     return luminance < 128
+
+
+# Anti-aliased button images (see rounded_rect_image). Cleared on theme
+# change so a leftover PhotoImage can't keep showing yesterday's accent.
+_AA_IMAGE_CACHE: dict = {}
+_AA_IMAGE_CACHE_MAX = 256
 
 
 # Dark text used on a bright/light time-block or chart-slice color --
@@ -138,7 +147,7 @@ def derive_palette(app_bg: str, panel_bg: str, text_primary: str, accent: str,
         "GRID_LINE": _mix(panel_bg, text_primary, 0.04),
         "GRID_LINE_HOUR": _mix(panel_bg, text_primary, 0.10),
         "HEADER_BG": _mix(panel_bg, text_primary, 0.045),
-        "TODAY_TINT": accent_soft,
+        "TODAY_TINT": _mix(panel_bg, accent, 0.18) if dark else _mix(panel_bg, accent, 0.12),
         "NOW_LINE": now_line,
         "BLOCK_BORDER": panel_bg,
         "SELECTION_OUTLINE": text_primary,
@@ -146,17 +155,47 @@ def derive_palette(app_bg: str, panel_bg: str, text_primary: str, accent: str,
         "PREVIEW_OUTLINE": accent_hover,
         "FIELD_BG": field_bg,
         "SURFACE": field_bg if dark else app_bg,
+        "GRID_BG": _mix(panel_bg, text_primary, 0.025) if dark else _mix(app_bg, panel_bg, 0.35),
     }
 
 
+# White / Dark Mode — the System pair. Auto ("system") reuses these so
+# matching the OS always lands on the same two looks as the picker cards.
+_WHITE_SEEDS = dict(app_bg="#F2F2F7", panel_bg="#FFFFFF", text_primary="#1C1C1E", accent="#007AFF",
+                    danger="#FF3B30", now_line="#FF9500")
+_DARK_MODE_SEEDS = dict(app_bg="#000000", panel_bg="#1C1C1E", text_primary="#F5F5F7", accent="#0A84FF",
+                        danger="#FF453A", now_line="#FF9F0A")
+_SYSTEM_SEEDS_LIGHT = _WHITE_SEEDS
+_SYSTEM_SEEDS_DARK = _DARK_MODE_SEEDS
+
 # ---------------------------------------------------------------------------
-# Eighteen curated palettes -- two to four per Figma mood category, a mix
-# of light and dark, each defined as just a handful of seeds (see
-# derive_palette above). "category" is metadata only (shown in the
-# Settings description text) -- THEME_ORDER below is the actual display
+# Curated palettes -- Figma mood categories, then Places (city moods) and
+# Atmosphere (photograph moods). Each is a handful of seeds (see
+# derive_palette above). "category" is metadata shown as section headers
+# in the Settings picker -- THEME_ORDER below is the actual display
 # order, grouped by category so related palettes sit together.
 # ---------------------------------------------------------------------------
 _PRESETS = [
+    ("white", "White", "System",
+     "Clean white — the default light look.",
+     _WHITE_SEEDS),
+    ("dark_mode", "Dark Mode", "System",
+     "True dark mode — black chrome, raised cards, same blue accent.",
+     _DARK_MODE_SEEDS),
+
+    ("frosted", "Frosted", "Glass",
+     "Light rice glass. Use the Translucency slider so the window stays readable.",
+     dict(app_bg="#DCE6F0", panel_bg="#F4F8FC", text_primary="#1A2433", accent="#4C8DFF",
+          danger="#E5484D", now_line="#FF8A3D")),
+    ("picom", "Picom", "Glass",
+     "Dark rice glass with a navy accent. Tune Translucency in Settings so text stays sharp.",
+     dict(app_bg="#0F1219", panel_bg="#161B24", text_primary="#E8EEF7", accent="#3A6B9A",
+          danger="#FF5D7A", now_line="#FFB454")),
+    ("hypr", "Hypr", "Glass",
+     "Hyprland-night rice — near-black glass and a mauve accent. Tune Translucency below.",
+     dict(app_bg="#0B0D14", panel_bg="#12141C", text_primary="#F0EAF8", accent="#CBA6F7",
+          danger="#F38BA8", now_line="#FAB387")),
+
     ("stormy_morning", "Stormy Morning", "Monochromatic",
      "Charcoal and slate-blue in one family -- calm, restrained, all business.",
      dict(app_bg="#0B0E13", panel_bg="#12161D", text_primary="#EDEFF3", accent="#5B7CA3")),
@@ -233,6 +272,82 @@ _PRESETS = [
      "Icy pale blue on white -- crisp, clean, a little wintry.",
      dict(app_bg="#F2F7FB", panel_bg="#FFFFFF", text_primary="#142433", accent="#4E7CB8",
           danger="#C0293F", now_line="#E0932E")),
+
+    # Places — city/region moods (TickTick-style scenic cards; original palettes).
+    ("cairo_sun", "Cairo", "Places",
+     "Warm desert sand and terracotta — late afternoon over the dunes.",
+     dict(app_bg="#F4E4CC", panel_bg="#FFF8EE", text_primary="#3A2414", accent="#E07A32",
+          danger="#C1442E", now_line="#2A7A8C")),
+    ("thames_fog", "London", "Places",
+     "Cool fog and river grey, with a bus-red accent.",
+     dict(app_bg="#E6EBF1", panel_bg="#FFFFFF", text_primary="#1C2430", accent="#C8102E",
+          danger="#9B1B2E", now_line="#E08A2E")),
+    ("pacific_drive", "Los Angeles", "Places",
+     "Peach sunset, palm-teal water, highway-hour light.",
+     dict(app_bg="#FFE6D2", panel_bg="#FFF6EE", text_primary="#2A1810", accent="#FF6B45",
+          danger="#D6334C", now_line="#2A9D8F")),
+    ("winter_square", "Moscow", "Places",
+     "Icy blue snow and a deep winter red.",
+     dict(app_bg="#E4EEF6", panel_bg="#FFFFFF", text_primary="#1A2744", accent="#C41E3A",
+          danger="#9B1830", now_line="#E08A2E")),
+    ("harbor_dusk", "New York", "Places",
+     "Dusk navy skyline with a warm gold window-light accent.",
+     dict(app_bg="#14182C", panel_bg="#1C2238", text_primary="#EEF1FF", accent="#E8A317",
+          danger="#FF5D5D", now_line="#FF8A3D")),
+    ("bay_span", "San Francisco", "Places",
+     "Bay fog and International Orange — the colour of the bridge.",
+     dict(app_bg="#E8EEF2", panel_bg="#FFFFFF", text_primary="#1E2A32", accent="#C4501A",
+          danger="#C0293F", now_line="#2A7A8C")),
+    ("han_spring", "Seoul", "Places",
+     "Temple red and spring green on warm paper.",
+     dict(app_bg="#F3F0E8", panel_bg="#FFFCF6", text_primary="#2C2418", accent="#C45C4A",
+          danger="#B03030", now_line="#6E9B6B")),
+    ("pearl_night", "Shanghai", "Places",
+     "River-city night: deep indigo and neon violet.",
+     dict(app_bg="#0B1024", panel_bg="#151A34", text_primary="#E8ECFF", accent="#7B5CFF",
+          danger="#FF4D6D", now_line="#FFB454")),
+    ("opera_bay", "Sydney", "Places",
+     "Harbour blue and a coral sunset on white sails.",
+     dict(app_bg="#DFF0F6", panel_bg="#FFFFFF", text_primary="#0E2A38", accent="#E07A4A",
+          danger="#C0293F", now_line="#1D7A8C")),
+    ("fuji_night", "Tokyo", "Places",
+     "Night indigo and sakura pink — city lights under the mountain.",
+     dict(app_bg="#12101C", panel_bg="#1A1828", text_primary="#F7EEF4", accent="#E89AB5",
+          danger="#FF6B6B", now_line="#7CFFD0")),
+
+    # Atmosphere — photograph moods, same idea as TickTick's photo themes.
+    ("cut_stone", "Architecture", "Atmosphere",
+     "Limestone and shadow — quiet galleries and concrete.",
+     dict(app_bg="#EBE6DE", panel_bg="#FAF7F2", text_primary="#2C2824", accent="#8A7A68",
+          danger="#C1442E", now_line="#4C7A58")),
+    ("silver_grain", "B&W", "Atmosphere",
+     "Silver gelatin — no colour, just light and grain.",
+     dict(app_bg="#141414", panel_bg="#1E1E1E", text_primary="#F2F2F2", accent="#A8A8A8",
+          danger="#E5484D", now_line="#FFFFFF")),
+    ("dune_heat", "Desert", "Atmosphere",
+     "Hot sand and a high-noon ochre sun.",
+     dict(app_bg="#F3E0B8", panel_bg="#FFF6E4", text_primary="#3D2A14", accent="#D4A017",
+          danger="#C1442E", now_line="#2A7A8C")),
+    ("deep_canopy", "Greenery", "Atmosphere",
+     "Leaf-filtered light — moss, fern, and shade.",
+     dict(app_bg="#E5F0E2", panel_bg="#F7FBF5", text_primary="#1A2E18", accent="#3D7A45",
+          danger="#C1442E", now_line="#D97706")),
+    ("swallow_sky", "Swallow", "Atmosphere",
+     "Open sky and a swallow-blue horizon.",
+     dict(app_bg="#D4E8F6", panel_bg="#F4FAFD", text_primary="#1A3040", accent="#3D7FA8",
+          danger="#C0293F", now_line="#E08A2E")),
+    ("first_light", "Dawn", "Atmosphere",
+     "First light — peach sky before the day starts.",
+     dict(app_bg="#FFDCC8", panel_bg="#FFF4EC", text_primary="#3A2018", accent="#E07048",
+          danger="#C0293F", now_line="#4E7CB8")),
+    ("orchard_bloom", "Blossom", "Atmosphere",
+     "Petal pink and orchard light.",
+     dict(app_bg="#FBE8EE", panel_bg="#FFF7F9", text_primary="#3A1828", accent="#E07090",
+          danger="#C0293F", now_line="#E08A2E")),
+    ("pack_ice", "Frozen", "Atmosphere",
+     "Pack ice and a polar-blue horizon.",
+     dict(app_bg="#E4F2F8", panel_bg="#F7FCFE", text_primary="#143044", accent="#4A96B8",
+          danger="#C0293F", now_line="#E08A2E")),
 ]
 
 THEMES = {
@@ -247,21 +362,21 @@ THEMES = {
 
 CUSTOM_THEME_ID = "custom"
 
-# Like "custom", "system" isn't a fixed entry in THEMES either -- it's a
-# live palette that follows the OS's current light/dark appearance
-# setting instead of user-picked seed colors. Unlike "custom" though, it
-# IS included in THEME_ORDER (at the very front -- see below), since it's
-# meant to be the obvious first choice rather than an opt-in extra.
+# Like "custom", "system" (Auto) isn't a fixed entry in THEMES -- it
+# follows the OS light/dark setting and reuses the White / Dark Mode
+# palettes. White and Dark Mode themselves are normal curated ids.
 SYSTEM_THEME_ID = "system"
+WHITE_THEME_ID = "white"
+DARK_MODE_THEME_ID = "dark_mode"
 
-# Display order for the Settings picker -- "system" first, then the
-# eighteen curated ids above grouped by category (Monochromatic,
-# Romantic, Playful, Vibrant, Neutral, Tranquil, Seasonal), in the same
-# order _PRESETS lists them. "custom" is NOT in here -- it's appended
-# separately wherever the picker is drawn (see
-# panels.SettingsPanel._build_theme_grid), since it isn't a fixed
-# palette but a live one built from the user's own seed colors below.
-THEME_ORDER = [SYSTEM_THEME_ID] + [theme_id for theme_id, *_ in _PRESETS]
+# Display order: White and Dark Mode first (the System pair), then Auto
+# (follows the OS into those same two palettes), then the rest of the
+# curated ids grouped by category. "custom" is NOT in here -- it's
+# appended separately wherever the picker is drawn.
+THEME_ORDER = [WHITE_THEME_ID, DARK_MODE_THEME_ID, SYSTEM_THEME_ID] + [
+    theme_id for theme_id, *_ in _PRESETS
+    if theme_id not in (WHITE_THEME_ID, DARK_MODE_THEME_ID)
+]
 
 DEFAULT_THEME_ID = SYSTEM_THEME_ID
 
@@ -269,9 +384,9 @@ DEFAULT_THEME_ID = SYSTEM_THEME_ID
 # toggle before that) gets mapped onto the closest match among the new
 # twenty rather than losing their preference outright.
 _LEGACY_MODE_MAP = {
-    "light": "winter_frost", "dark": "stormy_morning",
+    "light": "white", "dark": "dark_mode",
     "sleek_indigo": "stormy_morning", "neon_cyan": "cobalt_rush",
-    "crisp_light": "winter_frost", "emerald_terminal": "mossy_hollow",
+    "crisp_light": "white", "emerald_terminal": "mossy_hollow",
     "warm_amber": "sandstone", "violet_nebula": "magenta_pulse",
     "mac_glass": "ocean_mist",
 }
@@ -297,13 +412,7 @@ def set_custom_seeds(app_bg: str, panel_bg: str, text_primary: str, accent: str)
     _custom_seeds.update(app_bg=app_bg, panel_bg=panel_bg, text_primary=text_primary, accent=accent)
 
 
-# Seed colors for "Match System Appearance" -- fixed, unlike "custom"'s
-# user-picked ones, since this theme doesn't ask the user anything; it
-# just picks one of these two sets for itself based on the OS's current
-# appearance (see _detect_system_is_dark below). Same accent both ways
-# for a bit of brand continuity between the light and dark look.
-_SYSTEM_SEEDS_LIGHT = dict(app_bg="#F4F6FA", panel_bg="#FFFFFF", text_primary="#161B22", accent="#2F6FED")
-_SYSTEM_SEEDS_DARK = dict(app_bg="#0B0E14", panel_bg="#12161F", text_primary="#EAF0FF", accent="#2F6FED")
+# Auto ("system") reuses _WHITE_SEEDS / _DARK_MODE_SEEDS above.
 
 _system_is_dark_cache = None
 
@@ -356,6 +465,7 @@ def get_theme(theme_id: str) -> dict:
     if theme_id == CUSTOM_THEME_ID:
         return {
             "label": "Custom",
+            "category": "Custom",
             "description": "Your own palette -- pick a background, panel, text, and accent "
                             "color below and the rest is filled in to match.",
             "palette": derive_palette(**_custom_seeds),
@@ -363,9 +473,10 @@ def get_theme(theme_id: str) -> dict:
     if theme_id == SYSTEM_THEME_ID:
         seeds = _SYSTEM_SEEDS_DARK if _detect_system_is_dark() else _SYSTEM_SEEDS_LIGHT
         return {
-            "label": "System",
-            "description": "Match System Appearance -- follows your Mac or Windows "
-                            "light/dark setting. Checked once when the app starts; "
+            "label": "Auto",
+            "category": "System",
+            "description": "Follows your Mac or Windows light/dark setting — "
+                            "White or Dark Mode. Checked once when the app starts; "
                             "switching your OS appearance while the app is open won't "
                             "change it until you restart.",
             "palette": derive_palette(**seeds),
@@ -417,7 +528,7 @@ PREVIEW_FILL: str = _DEFAULT_PALETTE["PREVIEW_FILL"]
 PREVIEW_OUTLINE: str = _DEFAULT_PALETTE["PREVIEW_OUTLINE"]
 FIELD_BG: str = _DEFAULT_PALETTE["FIELD_BG"]
 SURFACE: str = _DEFAULT_PALETTE["SURFACE"]
-GRID_BG: str = PANEL_BG  # canvas background -- always mirrors PANEL_BG
+GRID_BG: str = _DEFAULT_PALETTE["GRID_BG"]
 
 
 def set_theme(theme_id: str):
@@ -431,6 +542,7 @@ def set_theme(theme_id: str):
         BLOCK_BORDER, SELECTION_OUTLINE, PREVIEW_FILL, PREVIEW_OUTLINE, FIELD_BG, SURFACE, GRID_BG
 
     theme_id = resolve_theme_id(theme_id)
+    _AA_IMAGE_CACHE.clear()
     CURRENT_THEME_ID = theme_id
     p = get_theme(theme_id)["palette"]
 
@@ -458,7 +570,14 @@ def set_theme(theme_id: str):
     PREVIEW_OUTLINE = p["PREVIEW_OUTLINE"]
     FIELD_BG = p["FIELD_BG"]
     SURFACE = p["SURFACE"]
-    GRID_BG = PANEL_BG
+    GRID_BG = p["GRID_BG"]
+
+
+def darken(color: str, amount: float) -> str:
+    """Public wrapper around the palette helper -- calendar time-blocks use
+    this for a slightly deeper left edge so they read as raised chips
+    rather than flat stamps."""
+    return _darken(color, amount)
 
 
 def get_theme_id() -> str:
@@ -629,10 +748,130 @@ def apply_theme(root):
     # Notebook mechanic (.add/.tab/.select, hidden-vs-normal panel state,
     # <<NotebookTabChanged>>) keeps working underneath exactly as before --
     # none of that lives in the Tab element's layout.
-    style.configure("TNotebook", background=APP_BG, borderwidth=0)
+    style.configure(
+        "TNotebook",
+        background=APP_BG,
+        borderwidth=0,
+        relief="flat",
+        padding=0,
+        lightcolor=APP_BG,
+        darkcolor=APP_BG,
+        bordercolor=APP_BG,
+    )
+    style.configure("TNotebook.Pane", background=APP_BG, borderwidth=0)
     style.layout("TNotebook.Tab", [])
+    # clam's Notebook.client still draws a 3D square around the page even
+    # with borderwidth=0; painting those edges in APP_BG hides the box.
+    try:
+        style.layout("TNotebook", [("Notebook.client", {"sticky": "nswe"})])
+    except tk.TclError:
+        pass
 
+    apply_window_chrome(root)
+    apply_window_opacity(root)
     return family
+
+
+# macOS traffic lights sit in the top-left of a full-size content view
+# (TickTick / VS Code "hidden inset" titlebar). Content must pad past them.
+MAC_TRAFFIC_INSET_PX = 70
+MAC_TITLEBAR_PX = 28
+
+
+def apply_window_chrome(root):
+    """Paint the native macOS titlebar with the theme instead of system white.
+
+    Uses Tk's Aqua -stylemask fullsizecontentview (transparent titlebar,
+    content drawn underneath) plus -appearance so the traffic lights match
+    light/dark palettes. Other platforms keep the stock window frame.
+    """
+    root._themed_titlebar = False
+    if sys.platform != "darwin":
+        return
+    try:
+        root.wm_attributes("-appearance", "darkaqua" if _is_dark(APP_BG) else "aqua")
+    except tk.TclError:
+        try:
+            root.tk.call(
+                "::tk::unsupported::MacWindowStyle", "appearance",
+                root._w, "darkaqua" if _is_dark(APP_BG) else "aqua")
+        except tk.TclError:
+            pass
+    try:
+        root.wm_attributes(
+            "-stylemask",
+            "titled closable miniaturizable resizable fullsizecontentview",
+        )
+        root._themed_titlebar = True
+        # Native title draws in the same strip as our header; hide it so
+        # the logo + name only appear once (traffic lights stay).
+        try:
+            root.title("")
+        except tk.TclError:
+            pass
+    except tk.TclError:
+        return
+
+
+# Glass / rice themes drop the whole window's opacity so the desktop
+# shows through (Tk has no per-widget blur). 1.0 = opaque. Linux needs a
+# compositor (Picom, Hyprland, KWin) for this to be visible.
+#
+# The user-chosen value is shared across Frosted / Picom / Hypr so a
+# slider in Settings can keep text readable. Floor is high enough that
+# labels don't wash out.
+GLASS_THEME_IDS = frozenset({"frosted", "picom", "hypr"})
+WINDOW_ALPHA_MIN = 0.88
+WINDOW_ALPHA_MAX = 1.0
+WINDOW_ALPHA_DEFAULT = 0.95
+_glass_alpha = WINDOW_ALPHA_DEFAULT
+
+
+def is_glass_theme(theme_id: str = None) -> bool:
+    tid = resolve_theme_id(theme_id if theme_id is not None else CURRENT_THEME_ID)
+    return tid in GLASS_THEME_IDS
+
+
+def clamp_glass_alpha(value) -> float:
+    try:
+        alpha = float(value)
+    except (TypeError, ValueError):
+        alpha = WINDOW_ALPHA_DEFAULT
+    return max(WINDOW_ALPHA_MIN, min(WINDOW_ALPHA_MAX, alpha))
+
+
+def get_glass_alpha() -> float:
+    return _glass_alpha
+
+
+def set_glass_alpha(value) -> float:
+    global _glass_alpha
+    _glass_alpha = clamp_glass_alpha(value)
+    return _glass_alpha
+
+
+def window_alpha(theme_id: str = None) -> float:
+    tid = resolve_theme_id(theme_id if theme_id is not None else CURRENT_THEME_ID)
+    if tid not in GLASS_THEME_IDS:
+        return 1.0
+    return _glass_alpha
+
+
+def apply_window_opacity(root, theme_id: str = None):
+    """Set wm -alpha for Glass themes; restore full opacity otherwise."""
+    alpha = window_alpha(theme_id)
+    try:
+        root.wm_attributes("-alpha", alpha)
+    except tk.TclError:
+        try:
+            root.attributes("-alpha", alpha)
+        except tk.TclError:
+            pass
+
+
+def themed_titlebar_left_pad() -> int:
+    """Extra left inset so header text clears the macOS traffic lights."""
+    return MAC_TRAFFIC_INSET_PX if sys.platform == "darwin" else 0
 
 
 # ---------------------------------------------------------------------------
@@ -779,29 +1018,32 @@ def draw_theme_swatch(canvas, theme_id: str, selected: bool, width=132, height=8
     "custom" exactly like any other id -- get_theme() builds its palette
     live from the user's current seed colors either way.
 
-    Mimics the real app's look in miniature: an app-background canvas, a
-    panel "card" inset into it, and a couple of colored bars standing in
-    for time blocks -- plus a filled corner badge when this is the
-    currently-selected theme, the same "selected" convention used for
-    project-color swatches elsewhere (see panels.ProjectPanel)."""
+    Places and Atmosphere cards get a tiny scenic illustration (sky, sun,
+    skyline) so the picker reads like TickTick's theme grid. Other palettes
+    keep the miniature calendar: an inset panel and two time-block bars.
+    """
     canvas.delete("all")
-    p = get_theme(theme_id)["palette"]
+    info = get_theme(theme_id)
+    p = info["palette"]
+    category = info.get("category") or ""
 
-    rounded_rect(canvas, 1, 1, width - 1, height - 1, radius=10, fill=p["APP_BG"], outline="")
+    place_rounded_rect(canvas, 1, 1, width - 1, height - 1, radius=10,
+                       fill=p["APP_BG"], outline="", background=p["APP_BG"])
 
-    card_pad = 10
-    card_top = 10
-    rounded_rect(canvas, card_pad, card_top, width - card_pad, height - 12,
-                 radius=6, fill=p["PANEL_BG"], outline=p["BORDER"], width=1)
-
-    # A couple of small "time block" bars in the accent + a muted neutral,
-    # just enough to suggest the calendar without drawing the whole thing.
-    bar_x = card_pad + 8
-    bar_w = width - 2 * (card_pad + 8)
-    rounded_rect(canvas, bar_x, card_top + 12, bar_x + bar_w, card_top + 26,
-                 radius=3, fill=p["ACCENT"], outline="")
-    rounded_rect(canvas, bar_x, card_top + 32, bar_x + bar_w * 0.62, card_top + 46,
-                 radius=3, fill=p["BORDER_STRONG"], outline="")
+    if category in ("Places", "Atmosphere", "Glass"):
+        _draw_scenic_mini(canvas, p, theme_id, width, height)
+    else:
+        card_pad = 10
+        card_top = 10
+        place_rounded_rect(canvas, card_pad, card_top, width - card_pad, height - 12,
+                           radius=6, fill=p["PANEL_BG"], outline=p["BORDER"], width=1,
+                           background=p["APP_BG"])
+        bar_x = card_pad + 8
+        bar_w = width - 2 * (card_pad + 8)
+        place_rounded_rect(canvas, bar_x, card_top + 12, bar_x + bar_w, card_top + 26,
+                           radius=3, fill=p["ACCENT"], outline="", background=p["PANEL_BG"])
+        place_rounded_rect(canvas, bar_x, card_top + 32, bar_x + bar_w * 0.62, card_top + 46,
+                           radius=3, fill=p["BORDER_STRONG"], outline="", background=p["PANEL_BG"])
 
     outline_color = p["ACCENT"] if selected else p["BORDER_STRONG"]
     outline_width = 3 if selected else 1
@@ -815,6 +1057,50 @@ def draw_theme_swatch(canvas, theme_id: str, selected: bool, width=132, height=8
                             fill=p["ACCENT"], outline="")
         canvas.create_line(bx - 4, by, bx - 1, by + 3, bx + 4, by - 4,
                             fill="white", width=2, capstyle="round", joinstyle="round")
+
+
+def _draw_scenic_mini(canvas, p, theme_id: str, width: int, height: int):
+    """Tiny sky / sun / skyline using only this palette's colors."""
+    sky = p["APP_BG"]
+    ground = p["PANEL_BG"]
+    accent = p["ACCENT"]
+    dark = _is_dark(p["PANEL_BG"])
+    horizon = int(height * 0.58)
+
+    canvas.create_rectangle(6, 6, width - 6, horizon, fill=sky, outline="")
+    canvas.create_rectangle(6, horizon, width - 6, height - 6, fill=ground, outline="")
+
+    seed = sum(ord(c) for c in theme_id)
+    sr = 9 + (seed % 5)
+    sx = width - 22 - (seed % 18)
+    sy = 18 + (seed % 10)
+    canvas.create_oval(sx - sr, sy - sr, sx + sr, sy + sr, fill=accent, outline="")
+
+    if dark:
+        for i in range(5):
+            dx = 12 + ((seed * (i + 3)) % (width - 40))
+            dy = 12 + ((seed * (i + 7)) % 22)
+            canvas.create_oval(dx, dy, dx + 2, dy + 2, fill=p["TEXT_MUTED"], outline="")
+
+    n = 5 + (seed % 3)
+    x = 8
+    gap = 2
+    avail = width - 16 - gap * (n - 1)
+    bw = max(8, avail // n)
+    for i in range(n):
+        bh = 10 + ((seed * (i + 5) * 13) % 26)
+        x0 = x + i * (bw + gap)
+        canvas.create_rectangle(x0, horizon - bh, x0 + bw, horizon + 2,
+                                fill=_mix(ground, accent, 0.22 if i % 2 else 0.08),
+                                outline="")
+    canvas.create_polygon(
+        6, horizon + 6,
+        18 + (seed % 20), horizon - 8,
+        40 + (seed % 30), horizon + 4,
+        width - 6, horizon + 8,
+        width - 6, height - 6,
+        6, height - 6,
+        fill=_mix(ground, p["TEXT_PRIMARY"], 0.06), outline="")
 
 
 def rounded_rect(canvas, x1, y1, x2, y2, radius: float = 8, exponent: float = 4.0, **kwargs):
@@ -881,7 +1167,10 @@ def rounded_rect(canvas, x1, y1, x2, y2, radius: float = 8, exponent: float = 4.
         (x1 + radius, y2 - radius, -90, -180),  # bottom-left
         (x1 + radius, y1 + radius, -180, -270),  # top-left
     ]
-    steps = 10  # points per 90-degree corner -- plenty smooth at any size used in this app
+    # Dense enough that a Retina display doesn't show the corner as a
+    # hexagon. Buttons themselves use rounded_rect_image() for true
+    # coverage anti-aliasing; this path is for large cards/blocks.
+    steps = max(18, int(radius * 2.5))
     # Superellipse exponent: |cos|**(2/n) in place of plain cos generalizes
     # the circle (n=2, where 2/n=1 and this collapses back to plain cos)
     # into Apple's flatter-curved, longer-tangent "continuous corner" shape
@@ -903,3 +1192,245 @@ def rounded_rect(canvas, x1, y1, x2, y2, radius: float = 8, exponent: float = 4.
             # smaller y on screen.
             points.append(cy - radius * math.copysign(abs(sin_v) ** power, sin_v))
     return canvas.create_polygon(points, **kwargs)
+
+
+def _sdf_rounded_rect(px: float, py: float, x1: float, y1: float,
+                      x2: float, y2: float, radius: float) -> float:
+    """Signed distance to a rounded rectangle (negative = inside)."""
+    cx = (x1 + x2) * 0.5
+    cy = (y1 + y2) * 0.5
+    half_w = (x2 - x1) * 0.5
+    half_h = (y2 - y1) * 0.5
+    dx = abs(px - cx) - (half_w - radius)
+    dy = abs(py - cy) - (half_h - radius)
+    ox = dx if dx > 0.0 else 0.0
+    oy = dy if dy > 0.0 else 0.0
+    inside = dx if dx > dy else dy
+    if inside > 0.0:
+        inside = 0.0
+    return math.hypot(ox, oy) + inside - radius
+
+
+def _coverage(distance: float) -> float:
+    """1px anti-alias ramp around the SDF zero-crossing."""
+    value = 0.5 - distance
+    if value <= 0.0:
+        return 0.0
+    if value >= 1.0:
+        return 1.0
+    return value
+
+
+def _aa_pixel(px: float, py: float, box, radius: float, fill: str,
+              background: str, outline: str, stroke: float) -> str:
+    x1, y1, x2, y2 = box
+    outer = _sdf_rounded_rect(px, py, x1, y1, x2, y2, radius)
+    if stroke > 0.0 and outline:
+        inner_r = max(0.0, radius - stroke)
+        inner = _sdf_rounded_rect(
+            px, py, x1 + stroke, y1 + stroke, x2 - stroke, y2 - stroke, inner_r)
+        a_outer = _coverage(outer)
+        if a_outer <= 0.0:
+            return background
+        color = outline if a_outer >= 1.0 else _mix(background, outline, a_outer)
+        a_inner = _coverage(inner)
+        if a_inner <= 0.0:
+            return color
+        return fill if a_inner >= 1.0 else _mix(color, fill, a_inner)
+    a = _coverage(outer)
+    if a <= 0.0:
+        return background
+    if a >= 1.0:
+        return fill
+    return _mix(background, fill, a)
+
+
+def _make_aa_image(width: int, height: int, radius: float, fill: str,
+                   background: str, outline: str, stroke: float, box=None,
+                   backgrounds=None):
+    import tkinter as tk
+
+    width = max(1, int(width))
+    height = max(1, int(height))
+    fill = (fill or "#000000").upper()
+    background = (background or "#000000").upper()
+    outline = (outline or "").upper()
+    if box is None:
+        box = (0.5, 0.5, width - 0.5, height - 0.5)
+    if backgrounds is None:
+        nw = ne = sw = se = background
+        uniform = True
+    else:
+        nw, ne, sw, se = [
+            (c or background or "#000000").upper() for c in backgrounds]
+        uniform = nw == ne == sw == se
+        if uniform:
+            background = nw
+    key = (width, height, round(float(radius), 2), fill,
+           (nw, ne, sw, se) if not uniform else background, outline,
+           round(float(stroke), 2), tuple(round(v, 2) for v in box))
+    cached = _AA_IMAGE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    rows = []
+    if uniform:
+        for y in range(height):
+            py = y + 0.5
+            cells = [
+                _aa_pixel(x + 0.5, py, box, radius, fill, background, outline, stroke)
+                for x in range(width)
+            ]
+            rows.append("{" + " ".join(cells) + "}")
+    else:
+        mid_x = width / 2.0
+        mid_y = height / 2.0
+        for y in range(height):
+            py = y + 0.5
+            row_left = nw if py < mid_y else sw
+            row_right = ne if py < mid_y else se
+            cells = []
+            for x in range(width):
+                bg = row_left if (x + 0.5) < mid_x else row_right
+                cells.append(_aa_pixel(
+                    x + 0.5, py, box, radius, fill, bg, outline, stroke))
+            rows.append("{" + " ".join(cells) + "}")
+    img = tk.PhotoImage(width=width, height=height)
+    img.put(" ".join(rows))
+    if len(_AA_IMAGE_CACHE) >= _AA_IMAGE_CACHE_MAX:
+        _AA_IMAGE_CACHE.clear()
+    _AA_IMAGE_CACHE[key] = img
+    return img
+
+
+def rounded_rect_image(width: int, height: int, radius: float, fill: str,
+                       background: str, outline: str = "", outline_width: float = 1.0):
+    """A PhotoImage of a coverage-antialiased rounded rect.
+
+    Tk's `create_polygon` fill is not antialiased, so on a Retina Mac the
+    corner of a 32px button looks stair-stepped. Painting the shape into
+    a PhotoImage (blending against `background` per pixel) is how we get
+    a smooth edge without extra dependencies, while still using whatever
+    fill/outline the current theme asked for.
+
+    Callers must keep the returned image alive (a widget attribute) so
+    Tk doesn't garbage-collect it out from under the canvas.
+    """
+    stroke = outline_width if outline else 0.0
+    return _make_aa_image(width, height, radius, fill, background, outline, stroke)
+
+
+def _keep_aa_image(canvas, img):
+    kept = getattr(canvas, "_aa_images", None)
+    if kept is None:
+        canvas._aa_images = [img]
+        return
+    kept.append(img)
+    if len(kept) > 240:
+        canvas._aa_images = kept[-80:]
+
+
+def _corner_patch(corner: str, size: int, radius: float, fill: str,
+                  background: str, outline: str, stroke: float):
+    far = 4096.0
+    if corner == "nw":
+        box = (0.5, 0.5, far, far)
+    elif corner == "ne":
+        box = (size - far, 0.5, size - 0.5, far)
+    elif corner == "se":
+        box = (size - far, size - far, size - 0.5, size - 0.5)
+    else:
+        box = (0.5, size - far, far, size - 0.5)
+    return _make_aa_image(size, size, radius, fill, background, outline, stroke, box)
+
+
+def place_rounded_rect(canvas, x1, y1, x2, y2, radius: float = 8, fill: str = "",
+                       outline: str = "", width: float = 1, background: str = None,
+                       corner_backgrounds=None, **item_kwargs):
+    """Draw a coverage-antialiased rounded rect on `canvas`.
+
+    Small chips (buttons, thumbs, swatches, short time blocks) are a
+    single PhotoImage. Large cards use four cached corner patches plus
+    rectangles so a sash-drag doesn't re-rasterize the whole panel.
+
+    `corner_backgrounds` is an optional dict of nw/ne/sw/se hex colors used
+    when the card floats over more than one surface (the Timer QDM menu
+    sits on the timer bar at the top and the timesheet at the bottom).
+    Without it, every cut-off corner blends toward a single `background`,
+    which reads as a black or white square halo if that color isn't what's
+    actually behind the card.
+
+    Returns the item ids created (last id is a stable raise-target).
+    Falls back to the polygon `rounded_rect` if PhotoImage isn't usable.
+    """
+    if x2 < x1:
+        x1, x2 = x2, x1
+    if y2 < y1:
+        y1, y2 = y2, y1
+    if background is None:
+        try:
+            background = canvas.cget("bg") or PANEL_BG
+        except Exception:
+            background = PANEL_BG
+
+    def _corner_bg(corner: str) -> str:
+        if corner_backgrounds:
+            color = corner_backgrounds.get(corner)
+            if color:
+                return color
+        return background
+
+    nw, ne, sw, se = _corner_bg("nw"), _corner_bg("ne"), _corner_bg("sw"), _corner_bg("se")
+    uniform = nw == ne == sw == se
+    paint_bg = nw
+    fill = fill or paint_bg
+    stroke = float(width) if outline else 0.0
+    ox, oy = int(round(x1)), int(round(y1))
+    w, h = max(1, int(round(x2 - x1))), max(1, int(round(y2 - y1)))
+    radius = max(0.0, min(float(radius), w / 2.0, h / 2.0))
+    bgs = None if uniform else (nw, ne, sw, se)
+    try:
+        if w * h <= 16000:
+            img = _make_aa_image(
+                w, h, radius, fill, paint_bg, outline, stroke, backgrounds=bgs)
+            _keep_aa_image(canvas, img)
+            return [canvas.create_image(ox, oy, image=img, anchor="nw", **item_kwargs)]
+
+        patch = max(2, int(math.ceil(radius)) + 2)
+        if patch * 2 >= min(w, h):
+            img = _make_aa_image(
+                w, h, radius, fill, paint_bg, outline, stroke, backgrounds=bgs)
+            _keep_aa_image(canvas, img)
+            return [canvas.create_image(ox, oy, image=img, anchor="nw", **item_kwargs)]
+
+        ids = []
+        for corner, px, py in (
+            ("nw", ox, oy),
+            ("ne", ox + w - patch, oy),
+            ("sw", ox, oy + h - patch),
+            ("se", ox + w - patch, oy + h - patch),
+        ):
+            img = _corner_patch(
+                corner, patch, radius, fill, _corner_bg(corner), outline, stroke)
+            _keep_aa_image(canvas, img)
+            ids.append(canvas.create_image(px, py, image=img, anchor="nw", **item_kwargs))
+        sw = int(round(stroke)) if stroke else 0
+        # Straight edges: outer hairline in outline, the rest in fill.
+        ids.append(canvas.create_rectangle(
+            ox + patch, oy + sw, ox + w - patch, oy + h - sw, fill=fill, outline="", **item_kwargs))
+        ids.append(canvas.create_rectangle(
+            ox + sw, oy + patch, ox + w - sw, oy + h - patch, fill=fill, outline="", **item_kwargs))
+        if sw and outline:
+            ids.append(canvas.create_rectangle(
+                ox + patch, oy, ox + w - patch, oy + sw, fill=outline, outline="", **item_kwargs))
+            ids.append(canvas.create_rectangle(
+                ox + patch, oy + h - sw, ox + w - patch, oy + h, fill=outline, outline="", **item_kwargs))
+            ids.append(canvas.create_rectangle(
+                ox, oy + patch, ox + sw, oy + h - patch, fill=outline, outline="", **item_kwargs))
+            ids.append(canvas.create_rectangle(
+                ox + w - sw, oy + patch, ox + w, oy + h - patch, fill=outline, outline="", **item_kwargs))
+        return ids
+    except Exception:
+        item = rounded_rect(
+            canvas, x1, y1, x2, y2, radius=radius, fill=fill,
+            outline=outline, width=width, **item_kwargs)
+        return [item]

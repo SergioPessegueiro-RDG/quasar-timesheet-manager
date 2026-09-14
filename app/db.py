@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS activities (
     jira_project            TEXT,
     issue_type              TEXT,
     project_id              INTEGER,
+    jira_status             TEXT,
+    jira_status_category    TEXT,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
 );
 
@@ -62,6 +64,7 @@ CREATE TABLE IF NOT EXISTS time_entries (
     updated_at      TEXT NOT NULL,
     jira_project    TEXT,
     issue_type      TEXT,
+    jira_worklog_id TEXT,
     FOREIGN KEY (activity_id) REFERENCES activities(id) ON DELETE SET NULL
 );
 
@@ -106,10 +109,13 @@ _MIGRATIONS = {
         ("jira_project", "TEXT"),
         ("issue_type", "TEXT"),
         ("project_id", "INTEGER"),
+        ("jira_status", "TEXT"),
+        ("jira_status_category", "TEXT"),
     ],
     "time_entries": [
         ("jira_project", "TEXT"),
         ("issue_type", "TEXT"),
+        ("jira_worklog_id", "TEXT"),
     ],
     "template_entries": [
         ("jira_project", "TEXT"),
@@ -502,6 +508,13 @@ class Database:
                 (int(collapsed), project_id),
             )
 
+    def collapse_all_projects(self):
+        """Fold every project header closed. Used after a large Jira sync
+        (and when the sidebar would otherwise try to draw hundreds of
+        activity rows at once) so Tk isn't asked to build a widget per QDM."""
+        with self._cursor() as cur:
+            cur.execute("UPDATE projects SET collapsed=1")
+
     def delete_project(self, project_id: int, delete_activities: bool = False):
         """Delete a Project. By default its Activities are kept and moved
         into the catch-all "General" project (every Activity must belong to
@@ -544,6 +557,31 @@ class Database:
             rows = cur.fetchall()
         return [self._row_to_project(r) for r in rows]
 
+    def get_project_by_name(self, name: str) -> Optional[Project]:
+        needle = (name or "").strip().lower()
+        if not needle:
+            return None
+        for project in self.list_projects():
+            if project.name.strip().lower() == needle:
+                return project
+        return None
+
+    def get_activity_by_jira_key(self, jira_key: str) -> Optional[Activity]:
+        needle = (jira_key or "").strip().upper()
+        if not needle:
+            return None
+        for activity in self.list_activities(include_archived=True):
+            if (activity.jira_key or "").strip().upper() == needle:
+                return activity
+        return None
+
+    def set_time_entry_worklog_id(self, entry_id: int, worklog_id: Optional[str]):
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE time_entries SET jira_worklog_id=?, updated_at=? WHERE id=?",
+                (worklog_id, _now(), entry_id),
+            )
+
     def get_project(self, project_id: int) -> Optional[Project]:
         with self._cursor() as cur:
             cur.execute("SELECT * FROM projects WHERE id=?", (project_id,))
@@ -576,6 +614,8 @@ class Database:
             activities.jira_project AS jira_project,
             activities.issue_type AS issue_type,
             activities.project_id AS project_id,
+            activities.jira_status AS jira_status,
+            activities.jira_status_category AS jira_status_category,
             COALESCE(projects.color, ?) AS color
         FROM activities
         LEFT JOIN projects ON activities.project_id = projects.id
@@ -592,10 +632,11 @@ class Database:
             cur.execute(
                 """INSERT INTO activities
                    (name, jira_key, default_duration_minutes, archived, created_at,
-                    jira_project, issue_type, project_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    jira_project, issue_type, project_id, jira_status, jira_status_category)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (a.name, a.jira_key, a.default_duration_minutes,
-                 int(a.archived), _now(), a.jira_project, a.issue_type, a.project_id),
+                 int(a.archived), _now(), a.jira_project, a.issue_type, a.project_id,
+                 a.jira_status, a.jira_status_category),
             )
             lastrowid = cur.lastrowid
             assert lastrowid is not None
@@ -611,10 +652,12 @@ class Database:
             cur.execute(
                 """UPDATE activities
                    SET name=?, jira_key=?, default_duration_minutes=?, archived=?,
-                       jira_project=?, issue_type=?, project_id=?
+                       jira_project=?, issue_type=?, project_id=?,
+                       jira_status=?, jira_status_category=?
                    WHERE id=?""",
                 (a.name, a.jira_key, a.default_duration_minutes,
-                 int(a.archived), a.jira_project, a.issue_type, a.project_id, a.id),
+                 int(a.archived), a.jira_project, a.issue_type, a.project_id,
+                 a.jira_status, a.jira_status_category, a.id),
             )
             # Keep existing time entries' snapshot in sync so the calendar
             # reflects a renamed activity, a moved-to-a-different-Project
@@ -670,12 +713,16 @@ class Database:
 
     @staticmethod
     def _row_to_activity(r) -> Activity:
+        keys = r.keys()
         return Activity(
             id=r["id"], name=r["name"], jira_key=r["jira_key"],
             default_duration_minutes=r["default_duration_minutes"],
             archived=bool(r["archived"]),
             jira_project=r["jira_project"], issue_type=r["issue_type"],
             project_id=r["project_id"], color=r["color"],
+            jira_status=r["jira_status"] if "jira_status" in keys else None,
+            jira_status_category=(
+                r["jira_status_category"] if "jira_status_category" in keys else None),
         )
 
     # ------------------------------------------------------------------
@@ -688,10 +735,11 @@ class Database:
                 """INSERT INTO time_entries
                    (activity_id, activity_name, jira_key, color, date,
                     start_time, end_time, notes, created_at, updated_at,
-                    jira_project, issue_type)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    jira_project, issue_type, jira_worklog_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (e.activity_id, e.activity_name, e.jira_key, e.color, e.date,
-                 e.start_time, e.end_time, e.notes, now, now, e.jira_project, e.issue_type),
+                 e.start_time, e.end_time, e.notes, now, now, e.jira_project, e.issue_type,
+                 e.jira_worklog_id),
             )
             lastrowid = cur.lastrowid
             assert lastrowid is not None
@@ -704,10 +752,12 @@ class Database:
             cur.execute(
                 """UPDATE time_entries
                    SET activity_id=?, activity_name=?, jira_key=?, color=?, date=?,
-                       start_time=?, end_time=?, notes=?, updated_at=?, jira_project=?, issue_type=?
+                       start_time=?, end_time=?, notes=?, updated_at=?, jira_project=?,
+                       issue_type=?, jira_worklog_id=?
                    WHERE id=?""",
                 (e.activity_id, e.activity_name, e.jira_key, e.color, e.date,
-                 e.start_time, e.end_time, e.notes, _now(), e.jira_project, e.issue_type, e.id),
+                 e.start_time, e.end_time, e.notes, _now(), e.jira_project, e.issue_type,
+                 e.jira_worklog_id, e.id),
             )
 
     def delete_time_entry(self, entry_id: int):
@@ -789,6 +839,7 @@ class Database:
             jira_key=r["jira_key"], color=r["color"], date=r["date"],
             start_time=r["start_time"], end_time=r["end_time"], notes=r["notes"],
             jira_project=r["jira_project"], issue_type=r["issue_type"],
+            jira_worklog_id=r["jira_worklog_id"] if "jira_worklog_id" in r.keys() else None,
         )
 
     # ------------------------------------------------------------------

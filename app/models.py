@@ -45,6 +45,20 @@ class Activity:
     issue_type: Optional[str] = None    # Jira issue type, e.g. "Sub-task"
     project_id: Optional[int] = None    # which Project this belongs to -- required in practice
     color: str = "#4C6EF5"              # denormalized from project_id's Project -- see docstring
+    jira_status: Optional[str] = None
+    jira_status_category: Optional[str] = None
+
+    def is_closed(self) -> bool:
+        """True when Jira considers this ticket done — used to mute/strike
+        it in the sidebar so closed QDMs don't look like live work."""
+        category = (self.jira_status_category or "").strip().lower()
+        if category == "done":
+            return True
+        name = (self.jira_status or "").strip().lower()
+        return name in {
+            "done", "closed", "resolved", "cancelled", "canceled",
+            "declined", "complete", "completed", "won't do",
+        }
 
 
 @dataclass
@@ -60,6 +74,11 @@ class TimeEntry:
     notes: str = ""
     jira_project: Optional[str] = None
     issue_type: Optional[str] = None
+    # Id of the Jira worklog this block was last pushed as, if any -- used
+    # so a later "Push hours to Jira" can PUT (update) that worklog instead
+    # of posting a duplicate. None means never pushed (or pushed via the
+    # old CSV path, which Jira doesn't give us an id back for).
+    jira_worklog_id: Optional[str] = None
 
     def duration_minutes(self) -> int:
         sh, sm = (int(x) for x in self.start_time.split(":"))

@@ -113,8 +113,12 @@ MIN_SLOT_HEIGHT_PX = 22
 MIN_DAY_WIDTH_PX = 140
 MAX_SLOT_HEIGHT_PX = 64
 MAX_DAY_WIDTH_PX = 340
-GUTTER_WIDTH_PX = 60  # left-hand column that shows hour labels
-HEADER_HEIGHT_PX = 44  # day-name header row
+GUTTER_WIDTH_PX = 64  # left-hand column that shows hour labels
+HEADER_HEIGHT_PX = 56  # weekday + date; tall enough that today's chip wraps both lines
+
+# Default length of a block created by dragging a QDM onto the grid.
+# After it lands, the usual resize handles still apply.
+QDM_DROP_MINUTES = 30
 
 # Extra room below the last hour gridline, inside the canvas. The bottom-most
 # hour label (e.g. "5 PM") is vertically centered ON that gridline, so it
@@ -122,10 +126,13 @@ HEADER_HEIGHT_PX = 44  # day-name header row
 CANVAS_BOTTOM_PAD_PX = 16
 
 # Height reserved for the per-day totals row underneath the grid, and the
-# minimum width given to the Activities sidebar (it's allowed to stretch
-# wider than this as the window grows, but never narrower).
-TOTALS_ROW_HEIGHT_PX = 28
+# width bounds of the Activities sidebar. The sidebar is a fixed pixel
+# width the user can drag wider (see the sash in main_window) so long QDM
+# names stay readable; it does not grow just because the window did.
+TOTALS_ROW_HEIGHT_PX = 32
 MIN_SIDEBAR_WIDTH_PX = 230
+MAX_SIDEBAR_WIDTH_PX = 640
+DEFAULT_SIDEBAR_WIDTH_PX = 320
 
 # Fixed width of the Activities sidebar when collapsed to its narrow icon
 # rail (see app/sidebar.py's Sidebar collapsed mode and app/main_window.py's
@@ -143,7 +150,7 @@ MIN_SIDEBAR_WIDTH_PX = 230
 SIDEBAR_COLLAPSED_WIDTH_PX = 60
 
 # Corner radius (px) used when drawing time blocks.
-BLOCK_CORNER_RADIUS = 10
+BLOCK_CORNER_RADIUS = 12
 
 # Minimum drag distance (px) before a click-drag is treated as a "drag to
 # create a block" rather than a plain click (quick-assign).

@@ -27,7 +27,7 @@ from . import theme
 # particular button or card actually ends up with, so small elements (e.g.
 # the "‹"/"›" week-nav buttons) automatically become pill-shaped instead of
 # needing a separate smaller constant.
-BUTTON_RADIUS = 10
+BUTTON_RADIUS = 12
 CARD_RADIUS = 14
 
 # See sidebar.py's original copy of this flag (now here) -- set
@@ -82,13 +82,45 @@ def _parent_bg(widget) -> str:
         return theme.PANEL_BG
     # Some ttk widgets/Tk builds don't raise TclError for an option they
     # don't really support -- they just hand back an empty string instead.
-    # An empty bg passed straight to Canvas(bg=...) doesn't inherit
-    # anything; it falls back to Tk's own platform default window color,
-    # which is exactly the "mismatched square halo" this function exists
-    # to prevent (seen on real macOS/Aqua ttk.Frame parents, not
-    # reproducible against plain tk widgets or on Linux). Treat a falsy
-    # result the same as a TclError.
-    return bg or theme.PANEL_BG
+    # Aqua also returns named system colors ("systemWindowBody") that
+    # PhotoImage blending can't parse. An unusable bg passed to
+    # rounded_rect_image is the "mismatched square halo" this function
+    # exists to prevent.
+    if not bg or not str(bg).startswith("#"):
+        return theme.PANEL_BG
+    return bg
+
+
+def _hex_bg_at(root, abs_x: int, abs_y: int, fallback: str) -> str:
+    """Hex background of the topmost widget under a screen coordinate.
+
+    Floating menus are parented to the toplevel so they can hang off their
+    field; `_parent_bg(root)` is then APP_BG (black or white), which is
+    almost never the color actually sitting behind the menu. Walk
+    `winfo_containing` instead so rounded-card corners blend into the
+    timer bar, calendar, sidebar, or whatever else the popup covers.
+    """
+    try:
+        widget = root.winfo_containing(int(abs_x), int(abs_y))
+    except tk.TclError:
+        widget = None
+    while widget is not None:
+        try:
+            own = widget.cget("bg")
+        except tk.TclError:
+            own = ""
+        if own and str(own).startswith("#"):
+            return own
+        try:
+            parent = widget.nametowidget(widget.winfo_parent())
+        except (tk.TclError, KeyError):
+            break
+        if parent is widget:
+            break
+        widget = parent
+    if fallback and str(fallback).startswith("#"):
+        return fallback
+    return theme.APP_BG
 
 
 # ---------------------------------------------------------------------------
@@ -118,8 +150,8 @@ _BUTTON_STYLES = {
                                bold=False, pad=(10, 6), border=None),
     "Danger.TButton": dict(bg="DANGER_SOFT", hover="DANGER_SOFT_ACTIVE", press="DANGER_SOFT_ACTIVE",
                             fg="DANGER", bold=False, pad=(10, 6), border=None),
-    "Nav.TButton": dict(bg="PANEL_BG", hover="SURFACE", press="BORDER", fg="TEXT_PRIMARY",
-                         bold=False, pad=(8, 5), border="BORDER_STRONG"),
+    "Nav.TButton": dict(bg="SURFACE", hover="BORDER", press="BORDER_STRONG", fg="TEXT_PRIMARY",
+                         bold=False, pad=(8, 5), border=None),
 }
 
 
@@ -138,7 +170,7 @@ class RoundedButton(tk.Canvas):
 
     def __init__(self, master, text: str = "", command: Optional[Callable[[], None]] = None,
                  style: str = "Secondary.TButton", width: Optional[int] = None,
-                 shadow: bool = False, **kwargs):
+                 shadow: bool = False, compact: bool = False, **kwargs):
         bg = kwargs.pop("bg", None) or _parent_bg(master)
         kwargs.setdefault("highlightthickness", 0)
         kwargs.setdefault("cursor", "hand2")
@@ -156,6 +188,7 @@ class RoundedButton(tk.Canvas):
         # drop shadow. Not the default for every button in the app; this
         # is a deliberately small, opt-in visual accent.
         self._shadow = shadow
+        self._compact = compact
 
         self.bind("<Configure>", lambda e: self._redraw())
         self.bind("<Enter>", self._on_enter)
@@ -217,11 +250,15 @@ class RoundedButton(tk.Canvas):
         text_w = f.measure(self._text)
         if self._char_width:
             text_w = max(text_w, self._char_width * f.measure("0"))
-        width = max(text_w + 2 * pad_x, 2 * pad_x + 4)
         height = f.metrics("linespace") + 2 * pad_y
-        # super().configure(), not self.configure() -- our own override
-        # above treats a "width" kwarg as ttk-style *character* width, not
-        # a pixel Canvas width, which would misinterpret this and recurse.
+        if self._compact:
+            # Square hit target drawn as a circle — the old width=3 +
+            # drop-shadow left a rectangular canvas peeking around +/−.
+            side = max(int(height), 30)
+            super().configure(width=side, height=side)
+            self._redraw()
+            return
+        width = max(text_w + 2 * pad_x, 2 * pad_x + 4)
         super().configure(width=int(width), height=int(height))
         self._redraw()
 
@@ -232,34 +269,46 @@ class RoundedButton(tk.Canvas):
         if w <= 1 or h <= 1:
             return
         spec = _BUTTON_STYLES[self._style]
-        fill = _color(spec["press"] if self._pressed else spec["hover"] if self._hover else spec["bg"])
-        fg = _color(spec["fg"])
-        outline = _color(spec["border"]) if spec["border"] else ""
-        # A quarter-pixel inset -- splitting the difference between the
-        # original 0.5 (hairline-aligned at an exact 1x/2x scale, but
-        # visibly uneven/glowy at other effective scale factors) and a
-        # plain 0 (even all the way around, but reads as harder-edged/
-        # more angular than the original look). 0.25 keeps the outline's
-        # anti-aliasing closer to how it always looked without
-        # reintroducing the lopsided "glow" the full 0.5 inset caused.
-        inset = 0.25
-        if self._shadow:
-            # Shrink the "real" button rect by a couple of px on the
-            # bottom-right, and draw a darkened copy of the same shape
-            # first, offset into the space that frees up -- the sliver
-            # that peeks out reads as a soft shadow without needing any
-            # extra canvas space beyond the button's own footprint (which
-            # would otherwise nudge this button out of vertical alignment
-            # with its non-shadowed siblings, e.g. the week-range label).
-            off = 2
-            shadow_color = _darken(self.cget("bg"), 0.35)
-            theme.rounded_rect(self, inset + off, inset + off, w - inset, h - inset,
-                                radius=BUTTON_RADIUS, fill=shadow_color, outline="")
-            theme.rounded_rect(self, inset, inset, w - inset - off, h - inset - off,
-                                radius=BUTTON_RADIUS, fill=fill, outline=outline, width=1)
+        parent_bg = self.cget("bg") or theme.APP_BG
+        if self._compact:
+            # Idle circle matches the parent so +/− / ‹ › read as glyphs,
+            # not as a square plate with a round button drawn inside.
+            fill = _color(spec["press"] if self._pressed else spec["hover"] if self._hover else spec["bg"])
+            if not self._hover and not self._pressed:
+                fill = parent_bg
+            outline = ""
         else:
-            theme.rounded_rect(self, inset, inset, w - inset, h - inset, radius=BUTTON_RADIUS,
-                                fill=fill, outline=outline, width=1)
+            fill = _color(spec["press"] if self._pressed else spec["hover"] if self._hover else spec["bg"])
+            outline = _color(spec["border"]) if spec["border"] else ""
+        fg = _color(spec["fg"])
+        radius = min(w, h) / 2.0 if self._compact else BUTTON_RADIUS
+        # Coverage-antialiased PhotoImage instead of create_polygon -- Tk
+        # polygon fills are not antialiased, which is the stair-stepped
+        # corner on Retina. Theme colors (fill/hover/outline) are unchanged;
+        # only the pixels along the curve are blended into the parent.
+        try:
+            if self._shadow and not self._compact:
+                off = 2
+                inner_w = max(1, w - off)
+                inner_h = max(1, h - off)
+                shadow_color = _darken(parent_bg, 0.35)
+                self._shadow_photo = theme.rounded_rect_image(
+                    inner_w, inner_h, radius, shadow_color, parent_bg,
+                    outline="", outline_width=0)
+                self.create_image(off, off, image=self._shadow_photo, anchor="nw")
+                self._photo = theme.rounded_rect_image(
+                    inner_w, inner_h, radius, fill, parent_bg,
+                    outline=outline, outline_width=1 if outline else 0)
+                self.create_image(0, 0, image=self._photo, anchor="nw")
+            else:
+                self._photo = theme.rounded_rect_image(
+                    w, h, radius, fill, parent_bg,
+                    outline=outline, outline_width=1 if outline else 0)
+                self.create_image(0, 0, image=self._photo, anchor="nw")
+        except tk.TclError:
+            theme.rounded_rect(
+                self, 0.5, 0.5, w - 0.5, h - 0.5, radius=radius,
+                fill=fill, outline=outline, width=1 if outline else 0)
         f = self._font()
         self.create_text(w / 2, h / 2, text=self._text, fill=fg, font=f, anchor="center")
 
@@ -294,6 +343,397 @@ class RoundedButton(tk.Canvas):
 
 
 # ---------------------------------------------------------------------------
+# Combobox (pill field + popup list)
+# ---------------------------------------------------------------------------
+class RoundedCombobox(tk.Frame):
+    """Readonly dropdown drawn as a pill, matching RoundedButton.
+
+    ttk.Combobox is a hard rectangle on Aqua/clam no matter how the style
+    is configured -- that's the box around the Timer's QDM picker. This
+    keeps the slice of the Combobox API this app actually uses
+    (textvariable, values, state, set/get/current/config/cget/bind, and
+    <<ComboboxSelected>>).
+    """
+
+    def __init__(self, master, textvariable=None, values=(), state="readonly",
+                 width=20, style: str = "", **kwargs):
+        kwargs.pop("style", None)
+        bg = kwargs.pop("bg", None) or _parent_bg(master)
+        kwargs.setdefault("highlightthickness", 0)
+        super().__init__(master, bg=bg, **kwargs)
+        self._parent_bg = bg
+        self._values = list(values)
+        self._state = state or "readonly"
+        self._char_width = int(width) if width else 20
+        self._variable = textvariable if textvariable is not None else tk.StringVar()
+        self._style_name = style or ""
+        self._popup: Optional[tk.Toplevel] = None
+        self._popup_canvas: Optional[tk.Canvas] = None
+        self._popup_row_h = 28
+        self._popup_active = -1
+        self._listbox = None
+        self._hover = False
+        self._photo = None
+        self._trace = self._variable.trace_add("write", lambda *_: self._redraw())
+
+        big = self._style_name == "Big.TCombobox"
+        family = theme.resolve_font_family()
+        self._tkfont = tkfont.Font(family=family, size=12 if big else 10)
+        pad_y = 10 if big else 7
+        self._height = int(self._tkfont.metrics("linespace") + 2 * pad_y)
+        self._min_width = int(self._char_width * self._tkfont.measure("0") + 40)
+
+        self._canvas = tk.Canvas(self, bg=bg, highlightthickness=0, cursor="hand2",
+                                  width=self._min_width, height=self._height)
+        self._canvas.pack(fill="both", expand=True)
+        super().configure(width=self._min_width, height=self._height, takefocus=1)
+
+        self._canvas.bind("<Configure>", lambda e: self._redraw())
+        self._canvas.bind("<Enter>", self._on_enter)
+        self._canvas.bind("<Leave>", self._on_leave)
+        self._canvas.bind("<Button-1>", self._on_click)
+        self.bind("<Button-1>", self._on_click)
+        self.bind("<Down>", lambda e: self._open_popup() or "break")
+        self.bind("<space>", lambda e: self._open_popup() or "break")
+        self.bind("<Escape>", lambda e: self._close_popup() or "break")
+        self.bind("<Destroy>", lambda e: self._close_popup())
+        # Close the popup on outside clicks without unbind_all, which
+        # would strip unrelated Button-1 handlers across the app.
+        self.bind_all("<Button-1>", self._on_any_click, add="+")
+
+        self._redraw()
+
+    def cget(self, key):
+        if key == "values":
+            return tuple(self._values)
+        if key == "state":
+            return self._state
+        if key == "textvariable":
+            return self._variable
+        return super().cget(key)
+
+    def __getitem__(self, key):
+        return self.cget(key)
+
+    def config(self, **kwargs):  # type: ignore[override]
+        self.configure(**kwargs)
+
+    def configure(self, **kwargs):  # type: ignore[override]
+        if "values" in kwargs:
+            self._values = list(kwargs.pop("values") or ())
+        if "state" in kwargs:
+            self._state = kwargs.pop("state") or "readonly"
+        if "textvariable" in kwargs:
+            if self._trace is not None:
+                try:
+                    self._variable.trace_remove("write", self._trace)
+                except tk.TclError:
+                    pass
+            self._variable = kwargs.pop("textvariable")
+            self._trace = self._variable.trace_add("write", lambda *_: self._redraw())
+        if "width" in kwargs:
+            self._char_width = int(kwargs.pop("width"))
+            self._min_width = int(self._char_width * self._tkfont.measure("0") + 40)
+            self._canvas.configure(width=self._min_width)
+            kwargs["width"] = self._min_width
+        if kwargs:
+            super().configure(**kwargs)
+        self._redraw()
+
+    def set(self, value):
+        self._variable.set(value if value is not None else "")
+
+    def get(self):
+        return self._variable.get()
+
+    def current(self, index=None):
+        if index is None:
+            try:
+                return self._values.index(self._variable.get())
+            except ValueError:
+                return -1
+        if 0 <= int(index) < len(self._values):
+            self._variable.set(self._values[int(index)])
+            return int(index)
+        return -1
+
+    def _on_enter(self, _event=None):
+        if self._state == "disabled":
+            return
+        self._hover = True
+        self._redraw()
+
+    def _on_leave(self, _event=None):
+        self._hover = False
+        self._redraw()
+
+    def _on_click(self, _event=None):
+        if self._state == "disabled":
+            return "break"
+        self.focus_set()
+        if self._popup is not None:
+            self._close_popup()
+        else:
+            self._open_popup()
+        return "break"
+
+    def _fill_fg(self):
+        disabled = self._state == "disabled"
+        fill = theme.SURFACE if disabled else (theme.BORDER if self._hover else theme.FIELD_BG)
+        fg = theme.TEXT_MUTED if disabled else theme.TEXT_PRIMARY
+        return fill, fg
+
+    def _redraw(self):
+        c = self._canvas
+        try:
+            w, h = c.winfo_width(), c.winfo_height()
+        except tk.TclError:
+            return
+        if w <= 1 or h <= 1:
+            w, h = self._min_width, self._height
+        c.delete("all")
+        fill, fg = self._fill_fg()
+        radius = min(w, h) / 2.0
+        try:
+            self._photo = theme.rounded_rect_image(
+                w, h, radius, fill, self._parent_bg, outline="", outline_width=0)
+            c.create_image(0, 0, image=self._photo, anchor="nw")
+        except tk.TclError:
+            theme.rounded_rect(c, 0.5, 0.5, w - 0.5, h - 0.5, radius=radius,
+                               fill=fill, outline="")
+        text = self._variable.get()
+        c.create_text(14, h / 2, text=text, fill=fg, font=self._tkfont, anchor="w")
+        cx, cy = w - 16, h / 2
+        c.create_line(cx - 4, cy - 2, cx, cy + 2, cx + 4, cy - 2,
+                      fill=fg, width=1.5, capstyle="round", joinstyle="round")
+
+    def _open_popup(self):
+        if self._state == "disabled" or self._popup is not None:
+            return
+        self.update_idletasks()
+        root = self.winfo_toplevel()
+
+        # Long QDM names must not clip to the field's character width.
+        text_w = max((self._tkfont.measure(str(v)) for v in self._values), default=0) + 48
+        field_w = max(int(self.winfo_width()), self._min_width)
+        max_w = 560
+        try:
+            rw = root.winfo_width()
+            if rw > 100:
+                max_w = max(220, rw - 24)
+        except tk.TclError:
+            pass
+        width = min(max(field_w, text_w), max_w)
+
+        rows_vis = min(max(len(self._values), 1), 8)
+        row_h = int(self._tkfont.metrics("linespace") + 12)
+        self._popup_row_h = row_h
+        height = rows_vis * row_h + 8
+
+        x = self.winfo_rootx()
+        y = self.winfo_rooty() + self.winfo_height() + 4
+        try:
+            screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
+            x = max(8, min(x, screen_w - width - 8))
+            if y + height > screen_h - 40:
+                up = self.winfo_rooty() - height - 6
+                if up >= 8:
+                    y = up
+        except tk.TclError:
+            pass
+
+        # Place the menu on the main window — a Toplevel becomes a real
+        # macOS document window (traffic lights + title) on current Tk.
+        rx = root.winfo_rootx()
+        ry = root.winfo_rooty()
+        local_x = int(x - rx)
+        local_y = int(y - ry)
+        local_x = max(8, min(local_x, max(8, root.winfo_width() - 16)))
+        width = min(width, max(160, root.winfo_width() - local_x - 8))
+        local_x = max(8, min(local_x, max(8, root.winfo_width() - width - 8)))
+        local_y = max(8, min(local_y, max(8, root.winfo_height() - height - 8)))
+
+        radius = 12
+        # Same inset RoundedCard uses when pad is omitted (max(8, radius)).
+        inset = max(8, radius)
+        outer_w = int(width) + 2 * inset
+        outer_h = int(height) + 2 * inset
+        local_x = max(8, min(local_x, max(8, root.winfo_width() - outer_w - 8)))
+        local_y = max(8, min(local_y, max(8, root.winfo_height() - outer_h - 8)))
+        fallback = self._parent_bg if str(self._parent_bg).startswith("#") else theme.APP_BG
+        try:
+            sx = int(root.winfo_rootx() + local_x)
+            sy = int(root.winfo_rooty() + local_y)
+        except tk.TclError:
+            sx, sy = 0, 0
+        corner_bgs = {
+            "nw": _hex_bg_at(root, sx, sy, fallback),
+            "ne": _hex_bg_at(root, sx + outer_w - 1, sy, fallback),
+            "sw": _hex_bg_at(root, sx, sy + outer_h - 1, fallback),
+            "se": _hex_bg_at(root, sx + outer_w - 1, sy + outer_h - 1, fallback),
+        }
+        card = RoundedCard(
+            root, bg=theme.FIELD_BG, radius=radius, outline=False,
+            outer_bg=corner_bgs["nw"], corner_bgs=corner_bgs)
+        card.place(x=local_x, y=local_y, width=outer_w, height=outer_h)
+        card.lift()
+
+        canvas = tk.Canvas(
+            card.body, width=width, height=height, bg=theme.FIELD_BG,
+            highlightthickness=0, borderwidth=0,
+        )
+        inner_h = max(len(self._values), 1) * row_h + 8
+        canvas.configure(scrollregion=(0, 0, width, inner_h))
+        if len(self._values) > 8:
+            sb = VectorScrollbar(card.body, command=canvas.yview, bg=theme.FIELD_BG)
+            canvas.configure(yscrollcommand=sb.set)
+            sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        self._popup = card
+        self._popup_canvas = canvas
+        self._popup_active = self.current()
+        self._popup_width = width
+
+        canvas.bind("<Motion>", self._on_popup_motion)
+        canvas.bind("<ButtonRelease-1>", self._on_pick)
+        canvas.bind("<Return>", self._on_pick)
+        canvas.bind("<Escape>", lambda e: self._close_popup())
+        canvas.bind("<MouseWheel>", self._on_popup_wheel)
+        canvas.bind("<Button-4>", self._on_popup_wheel)
+        canvas.bind("<Button-5>", self._on_popup_wheel)
+        card.bind("<Escape>", lambda e: self._close_popup())
+
+        self._redraw_popup_rows()
+        try:
+            canvas.focus_set()
+        except tk.TclError:
+            pass
+
+    def _fit_popup_text(self, text: str, max_px: int) -> str:
+        if self._tkfont.measure(text) <= max_px:
+            return text
+        ell = "…"
+        while text and self._tkfont.measure(text + ell) > max_px:
+            text = text[:-1]
+        return (text + ell) if text else ell
+
+    def _redraw_popup_rows(self):
+        c = self._popup_canvas
+        if c is None:
+            return
+        c.delete("row")
+        w = int(getattr(self, "_popup_width", 0) or c.winfo_width() or 200)
+        max_text = max(40, w - 28)
+        current = self.current()
+        for i, value in enumerate(self._values):
+            y0 = 4 + i * self._popup_row_h
+            y1 = y0 + self._popup_row_h
+            if i == self._popup_active:
+                fill = theme.ACCENT
+                fg = "#FFFFFF"
+            elif i == current:
+                fill = theme.ACCENT_SOFT
+                fg = theme.ACCENT
+            else:
+                fill = ""
+                fg = theme.TEXT_PRIMARY
+            if fill:
+                theme.place_rounded_rect(
+                    c, 6, y0 + 2, w - 6, y1 - 2,
+                    radius=8, fill=fill, outline="",
+                    background=theme.FIELD_BG, tags="row")
+            c.create_text(
+                16, (y0 + y1) / 2, text=self._fit_popup_text(str(value), max_text),
+                fill=fg, font=self._tkfont, anchor="w", tags="row")
+
+    def _popup_index_at(self, y: float) -> Optional[int]:
+        c = self._popup_canvas
+        if c is None:
+            return None
+        y = float(c.canvasy(y))
+        idx = int((y - 4) // self._popup_row_h)
+        if 0 <= idx < len(self._values):
+            return idx
+        return None
+
+    def _on_popup_motion(self, event):
+        idx = self._popup_index_at(event.y)
+        if idx is None or idx == self._popup_active:
+            return
+        self._popup_active = idx
+        self._redraw_popup_rows()
+
+    def _on_popup_wheel(self, event):
+        c = self._popup_canvas
+        if c is None:
+            return "break"
+        if getattr(event, "num", None) == 4 or getattr(event, "delta", 0) > 0:
+            c.yview_scroll(-1, "units")
+        else:
+            c.yview_scroll(1, "units")
+        return "break"
+
+    def _on_pick(self, event=None):
+        if self._popup is None:
+            return
+        idx = self._popup_active
+        if event is not None and hasattr(event, "y"):
+            hit = self._popup_index_at(event.y)
+            if hit is not None:
+                idx = hit
+        if idx is not None and 0 <= idx < len(self._values):
+            self._variable.set(self._values[idx])
+            self._close_popup()
+            self.event_generate("<<ComboboxSelected>>")
+        else:
+            self._close_popup()
+
+    def _on_any_click(self, event):
+        try:
+            if not self.winfo_exists() or self._popup is None:
+                return
+        except tk.TclError:
+            return
+        widget = event.widget
+        if isinstance(widget, str):
+            try:
+                widget = self.nametowidget(widget)
+            except KeyError:
+                widget = None
+        if widget is None:
+            return
+        if self._is_within(widget, self) or self._is_within(widget, self._popup):
+            return
+        self._close_popup()
+
+    @staticmethod
+    def _is_within(widget, ancestor) -> bool:
+        w = widget
+        while w is not None:
+            if w is ancestor:
+                return True
+            w = getattr(w, "master", None)
+        return False
+
+    def _close_popup(self):
+        popup = self._popup
+        self._popup = None
+        self._popup_canvas = None
+        self._listbox = None
+        if popup is not None:
+            try:
+                popup.destroy()
+            except tk.TclError:
+                pass
+        try:
+            if self.winfo_exists():
+                self._redraw()
+        except tk.TclError:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Rounded cards
 # ---------------------------------------------------------------------------
 class RoundedCard(tk.Frame):
@@ -307,38 +747,65 @@ class RoundedCard(tk.Frame):
     """
 
     def __init__(self, master, bg: Optional[str] = None, radius: int = CARD_RADIUS,
-                 outline: bool = True, pad: Optional[int] = None, **kwargs):
+                 outline: bool = True, pad: Optional[int] = None,
+                 shrink: bool = False, outer_bg: Optional[str] = None,
+                 corner_bgs: Optional[dict] = None, **kwargs):
         self._bg = bg or theme.PANEL_BG
-        outer_bg = _parent_bg(master)
+        self._corner_bgs = corner_bgs
+        if outer_bg is None and corner_bgs:
+            outer_bg = corner_bgs.get("nw")
+        if outer_bg is None:
+            outer_bg = _parent_bg(master)
         kwargs.setdefault("bg", outer_bg)
         super().__init__(master, **kwargs)
         self._radius = radius
         self._outline = outline
-        self._inset = pad if pad is not None else max(6, radius // 2)
+        if pad is None:
+            self._inset = max(8, int(radius))
+        elif pad <= 0:
+            self._inset = 0
+        else:
+            # Square `.body` corners must sit on the straight edges of the
+            # rounded canvas, otherwise they read as a box around the card.
+            self._inset = max(int(pad), int(radius))
 
         self._canvas = tk.Canvas(self, highlightthickness=0, bg=outer_bg)
         self._canvas.place(x=0, y=0, relwidth=1, relheight=1)
         self._canvas.bind("<Configure>", lambda e: self._redraw())
+        self._shape_ids = []
+        self._drawn_size = None
 
         self.body = tk.Frame(self, bg=self._bg)
         i = self._inset
-        self.body.place(x=i, y=i, relwidth=1, relheight=1, width=-2 * i, height=-2 * i)
+        # `place`d children don't give this Frame a requested size, so a
+        # card packed fill="x" (search, chips) would collapse to 0px tall.
+        # Shrink-wrap by packing `.body` instead; fill-panels keep place.
+        if shrink:
+            self.body.pack(fill="both", expand=True, padx=i, pady=i)
+        else:
+            self.body.place(x=i, y=i, relwidth=1, relheight=1, width=-2 * i, height=-2 * i)
 
     def _redraw(self):
         c = self._canvas
-        c.delete("all")
         w, h = c.winfo_width(), c.winfo_height()
         if w <= 1 or h <= 1:
             return
+        size = (w, h)
+        if size == self._drawn_size and self._shape_ids:
+            return
         outline_color = theme.BORDER if self._outline else ""
-        # See the matching note in RoundedButton._redraw -- same quarter-
-        # pixel inset (halfway between the too-glowy 0.5 and the too-
-        # angular 0) applied here too, everywhere a RoundedCard draws its
-        # own border (Activities panel, calendar grid, Timer bar, every
-        # Settings/Duplicate/etc. panel).
-        inset = 0.25
-        theme.rounded_rect(c, inset, inset, w - inset, h - inset, radius=self._radius,
-                            fill=self._bg, outline=outline_color, width=1)
+        outer_bg = c.cget("bg") or theme.APP_BG
+        new_ids = theme.place_rounded_rect(
+            c, 0, 0, w, h, radius=self._radius,
+            fill=self._bg, outline=outline_color, width=1 if self._outline else 0,
+            background=outer_bg, corner_backgrounds=self._corner_bgs)
+        for old_id in self._shape_ids:
+            try:
+                c.delete(old_id)
+            except tk.TclError:
+                pass
+        self._shape_ids = new_ids
+        self._drawn_size = size
 
 
 class ScrollArea(RoundedCard):
@@ -367,6 +834,7 @@ class ScrollArea(RoundedCard):
 
     def __init__(self, master, bg: Optional[str] = None, radius: int = CARD_RADIUS,
                  outline: bool = True, pad: Optional[int] = None, **kwargs):
+        kwargs.pop("shrink", None)
         super().__init__(master, bg=bg, radius=radius, outline=outline, pad=pad, **kwargs)
         bgc = self._bg
 
@@ -728,8 +1196,9 @@ class VectorScrollbar(tk.Canvas):
         top, bottom = self._thumb_bounds()
         pad = 2
         color = theme.ACCENT if (self._hover or self._dragging) else theme.BORDER_STRONG
-        theme.rounded_rect(self, pad, top + pad, w - pad, bottom - pad,
-                            radius=(w - 2 * pad) / 2, fill=color, outline="")
+        theme.place_rounded_rect(self, pad, top + pad, w - pad, bottom - pad,
+                                 radius=(w - 2 * pad) / 2, fill=color, outline="",
+                                 background=self.cget("bg"))
 
     def _on_enter(self, _event=None):
         self._hover = True
@@ -920,8 +1389,9 @@ class HorizontalVectorScrollbar(tk.Canvas):
         left, right = self._thumb_bounds()
         pad = 2
         color = theme.ACCENT if (self._hover or self._dragging) else theme.BORDER_STRONG
-        theme.rounded_rect(self, left + pad, pad, right - pad, h - pad,
-                            radius=(h - 2 * pad) / 2, fill=color, outline="")
+        theme.place_rounded_rect(self, left + pad, pad, right - pad, h - pad,
+                                 radius=(h - 2 * pad) / 2, fill=color, outline="",
+                                 background=self.cget("bg"))
 
     def _on_enter(self, _event=None):
         self._hover = True

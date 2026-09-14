@@ -274,7 +274,7 @@ win.update()
 check("Time Block tab opened", str(win.notebook.tab(win.timeblock_panel, "state")) == "normal")
 check("_is_typing_target recognizes the Notes box (a tk.Text)",
       win._is_typing_target(win.timeblock_panel.notes_text))
-check("_is_typing_target recognizes the Activity field (a ttk.Combobox)",
+check("_is_typing_target recognizes the Activity field (a RoundedCombobox)",
       win._is_typing_target(win.timeblock_panel.activity_combo) is True)
 check("_is_typing_target does NOT flag a plain container Frame",
       win._is_typing_target(win.timeblock_panel) is False)

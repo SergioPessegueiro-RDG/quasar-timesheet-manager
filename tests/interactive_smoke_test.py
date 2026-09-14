@@ -140,7 +140,7 @@ sb.clear_armed()
 check("Activity un-armed after cancel", sb.armed_activity_id is None)
 
 print("\n--- Edit panel on an EXISTING entry pre-fills the readonly comboboxes ---")
-# Regression check: a readonly ttk.Combobox's displayed text must reflect
+# Regression check: a readonly combobox's displayed text must reflect
 # an early textvariable.set() (this silently rendered blank in testing
 # until the form was reordered to populate values before focus is set).
 # Assert against the widgets' own .get(), not just the backing StringVars,

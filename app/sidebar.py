@@ -6,10 +6,41 @@ import tkinter as tk
 from tkinter import messagebox
 from typing import Callable, Dict, List, Optional
 
-from . import theme
+from . import config, theme
 from .db import Database
 from .models import Activity, Project
 from .widgets import CARD_RADIUS, RoundedButton, RoundedCard, ScrollArea
+
+# Rows are built once per refresh and shown/hidden with pack, so typing
+# in search never destroys the list. Closed tickets start collapsed.
+# Packing chrome around an activity name (card pad, row pad, indent, dot).
+_NAME_WRAP_CHROME_PX = 80
+_SEARCH_HINT = "Search name or number…"
+
+
+def qdm_haystack(activity: Activity) -> str:
+    """Precomputed lowercase blob for live search (name, key, number)."""
+    key = (activity.jira_key or "").strip()
+    number = config.jira_key_number(key)
+    return "\n".join((
+        (activity.name or "").lower(),
+        key.lower(),
+        number.lower(),
+        number.replace("-", "").lower(),
+        "".join(c for c in key if c.isdigit()),
+    ))
+
+
+def qdm_matches(activity: Activity, query: str) -> bool:
+    """True if `query` is empty or matches the QDM's name / Jira key / number."""
+    q = (query or "").strip().lower()
+    if not q:
+        return True
+    hay = qdm_haystack(activity)
+    if q in hay:
+        return True
+    digits = "".join(c for c in q if c.isdigit())
+    return bool(digits) and digits in hay
 
 
 class Sidebar(tk.Frame):
@@ -17,7 +48,9 @@ class Sidebar(tk.Frame):
                  open_activity_panel: Callable[..., None],
                  open_project_panel: Callable[..., None],
                  collapsed: bool = False,
-                 on_toggle_collapse: Optional[Callable[[], None]] = None, **kwargs):
+                 on_toggle_collapse: Optional[Callable[[], None]] = None,
+                 on_jira_sync: Optional[Callable[[], None]] = None,
+                 content_width: Optional[int] = None, **kwargs):
         kwargs.setdefault("bg", theme.APP_BG)
         kwargs.setdefault("highlightthickness", 0)
         super().__init__(master, **kwargs)
@@ -25,6 +58,7 @@ class Sidebar(tk.Frame):
         self.on_change = on_change  # called whenever armed activity or list/project state changes
         self.open_activity_panel = open_activity_panel
         self.open_project_panel = open_project_panel
+        self.on_jira_sync = on_jira_sync
         # Collapsed is fixed for this instance's whole lifetime -- toggling
         # it (see on_toggle_collapse, called from main_window.py) triggers
         # a full window rebuild rather than switching this Sidebar between
@@ -38,28 +72,27 @@ class Sidebar(tk.Frame):
         self.family = theme.resolve_font_family()
         self._activities: List[Activity] = []
         self._projects: List[Project] = []
+        self._sidebar_px = content_width or config.DEFAULT_SIDEBAR_WIDTH_PX
+        self._name_labels: List[tk.Label] = []
+        self._calendar = None
+        self._row_press: Optional[dict] = None
+        self._arm_job = None
+        self._search_placeholder_on = False
+        self.search_var = tk.StringVar()
+        self._search_job = None
+        self._filter_items: List[dict] = []
+        self._empty_search = None
+        # Project ids whose closed-ticket subsection is currently expanded.
+        # In-memory only: closed lists start collapsed every session so a
+        # large backlog doesn't paint itself on launch.
+        self._show_closed_for: set = set()
 
-        # The whole panel (header + hint + scrolling list) is one
-        # RoundedCard now, so it reads as a single rounded box against the
-        # window background -- matching the rounded buttons/calendar/timer
-        # bar elsewhere instead of a plain rectangular sidebar with only
-        # its inner list rounded. Real content lives in `.body`, exactly
-        # like every other RoundedCard user in this app.
-        #
-        # Collapsed mode uses a smaller outer pack margin and a smaller
-        # RoundedCard `pad` than the expanded card above -- the standard
-        # 14px pack margin plus RoundedCard's own ~7px inset (28px total,
-        # both sides) is fine against a 230px+ expanded sidebar, but
-        # against a ~60px collapsed rail it left almost no real content
-        # width. That's what actually broke the first collapsed design:
-        # it wasn't just a styling problem, the button and Project dots
-        # were being squeezed into a sliver only a few pixels wide and
-        # rendering clipped. See config.SIDEBAR_COLLAPSED_WIDTH_PX for the
-        # matching width-budget comment.
-        card_padx, card_pady = (6, 10) if self.collapsed else (14, 14)
-        card = RoundedCard(self, bg=theme.PANEL_BG, radius=CARD_RADIUS,
-                            pad=4 if self.collapsed else None)
-        card.pack(fill="both", expand=True, padx=card_padx, pady=card_pady)
+        card = RoundedCard(
+            self, bg=theme.PANEL_BG,
+            radius=6 if self.collapsed else CARD_RADIUS,
+            pad=6 if self.collapsed else None, outline=False)
+        side_pad = (6, 2) if self.collapsed else (12, 8)
+        card.pack(fill="both", expand=True, padx=side_pad, pady=10 if self.collapsed else 12)
         inner = card.body
 
         # list_container/canvas stay None in collapsed mode -- there's no
@@ -116,38 +149,166 @@ class Sidebar(tk.Frame):
             self.list_frame = tk.Frame(inner, bg=theme.PANEL_BG)
             self.list_frame.pack(fill="both", expand=True)
             if self.on_toggle_collapse is not None:
-                for widget in (card, inner, top_row, label_canvas, self.list_frame):
+                for widget in (self, inner, top_row, label_canvas, self.list_frame):
                     widget.configure(cursor="hand2")
                     widget.bind("<Button-1>", lambda e: self.on_toggle_collapse())
         else:
             header = tk.Frame(inner, bg=theme.PANEL_BG)
-            header.pack(fill="x", pady=(0, 10))
+            header.pack(fill="x", pady=(0, 8))
             tk.Label(header, text="QDM's", font=(self.family, 13, "bold"),
                      bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY).pack(side="left")
             if self.on_toggle_collapse is not None:
-                RoundedButton(header, text="«", width=3, style="Secondary.TButton",
+                RoundedButton(header, text="«", width=3, style="Nav.TButton", compact=True,
                               command=self.on_toggle_collapse).pack(side="right")
             RoundedButton(header, text="+ QDM", style="Accent.TButton", command=self._add_activity).pack(
                 side="right", padx=(0, 6))
             RoundedButton(header, text="+ Project", style="Secondary.TButton", command=self._add_project).pack(
                 side="right", padx=(0, 6))
 
+            search_row = tk.Frame(inner, bg=theme.PANEL_BG)
+            search_row.pack(fill="x", pady=(0, 10))
+            if self.on_jira_sync is not None:
+                RoundedButton(search_row, text="Sync", style="Accent.TButton",
+                              command=self.on_jira_sync).pack(side="right", padx=(8, 0))
+            # shrink=True: this card is packed fill="x", so `.body` must
+            # pack (not place) or the field collapses to 0px tall.
+            search_card = RoundedCard(
+                search_row, bg=theme.FIELD_BG, radius=10, pad=10, outline=False,
+                shrink=True)
+            search_card.pack(side="left", fill="x", expand=True)
+            self.search_entry = tk.Entry(
+                search_card.body, textvariable=self.search_var, font=(self.family, 10),
+                relief="flat", bd=0, bg=theme.FIELD_BG, fg=theme.TEXT_MUTED,
+                insertbackground=theme.TEXT_PRIMARY, highlightthickness=0)
+            self.search_entry.pack(fill="x", ipady=2)
+            self._search_placeholder_on = True
+            self.search_var.set(_SEARCH_HINT)
+            self.search_entry.bind("<FocusIn>", self._search_focus_in)
+            self.search_entry.bind("<FocusOut>", self._search_focus_out)
+            self.search_var.trace_add("write", lambda *_: self._on_search_changed())
+
             # ScrollArea is itself a RoundedCard with a scrolling interior
-            # built in -- see app/widgets.py for the mouse-wheel/drag/
-            # click-arrow scrolling it provides (three independent ways to
-            # scroll, since wheel-event delivery has proven unreliable on
-            # at least one real user's machine across several binding
-            # designs already). Its own outline is turned off here since
-            # it now nests inside the outer card above -- a second visible
-            # border right inside the first would just look like a
-            # box-in-a-box instead of one clean panel.
-            scroll_area = ScrollArea(inner, bg=theme.PANEL_BG, outline=False)
+            # built in -- see app/widgets.py. Outline off and page-colored
+            # so the list sits on the window, not inside another panel.
+            scroll_area = ScrollArea(inner, bg=theme.PANEL_BG, outline=False, pad=0)
             scroll_area.pack(fill="both", expand=True)
             self.list_container = scroll_area
             self.canvas = scroll_area.canvas
             self.list_frame = scroll_area.content
 
         self.refresh()
+
+    def set_calendar(self, calendar):
+        """The grid this sidebar drops QDMs onto (Timesheet or Template)."""
+        self._calendar = calendar
+
+    def _search_query(self) -> str:
+        if self.collapsed or self._search_placeholder_on:
+            return ""
+        return (self.search_var.get() or "").strip()
+
+    def _search_focus_in(self, _event=None):
+        if self._search_placeholder_on:
+            self._search_placeholder_on = False
+            self.search_var.set("")
+            self.search_entry.configure(fg=theme.TEXT_PRIMARY)
+
+    def _search_focus_out(self, _event=None):
+        if not (self.search_var.get() or "").strip():
+            self._search_placeholder_on = True
+            self.search_var.set(_SEARCH_HINT)
+            self.search_entry.configure(fg=theme.TEXT_MUTED)
+
+    def _on_search_changed(self):
+        if self.collapsed or self.list_container is None:
+            return
+        job = self._search_job
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._search_job = self.after(50, self._flush_search)
+
+    def _flush_search(self):
+        self._search_job = None
+        self._apply_filter()
+
+    def _track(self, widget, pack, **meta):
+        item = {"widget": widget, "pack": pack}
+        item.update(meta)
+        self._filter_items.append(item)
+        return item
+
+    def _apply_filter(self):
+        """Show/hide already-built rows. Typing must not destroy widgets."""
+        if self.collapsed or not self._filter_items:
+            return
+        q = self._search_query().lower()
+        collapsed_ids = {p.id for p in self._projects if p.collapsed}
+        matching_projects = set()
+        if q:
+            for item in self._filter_items:
+                if item["kind"] == "activity":
+                    matched = q in item["haystack"]
+                    item["_match"] = matched
+                    if matched:
+                        matching_projects.add(item["project_id"])
+        else:
+            for item in self._filter_items:
+                if item["kind"] == "activity":
+                    item["_match"] = True
+
+        any_activity = False
+        for item in self._filter_items:
+            kind = item["kind"]
+            pid = item.get("project_id")
+            vis = False
+            if kind == "project":
+                vis = (not q) or (pid in matching_projects)
+            elif kind == "activity":
+                if q:
+                    vis = item.get("_match", False)
+                else:
+                    vis = pid not in collapsed_ids
+                    if item["closed"]:
+                        vis = vis and pid in self._show_closed_for
+                any_activity = any_activity or vis
+            elif kind == "closed_toggle":
+                vis = (not q) and pid not in collapsed_ids
+                self._sync_closed_arrow(item)
+            elif kind == "extra":
+                vis = (not q) and pid not in collapsed_ids
+                if item.get("closed"):
+                    vis = vis and pid in self._show_closed_for
+            elif kind == "hint":
+                vis = (not q) and pid not in collapsed_ids
+            elif kind == "empty_search":
+                vis = False
+            item["_vis"] = vis
+
+        if q:
+            for item in self._filter_items:
+                if item["kind"] == "empty_search":
+                    item["_vis"] = not any_activity
+
+        for item in self._filter_items:
+            item["widget"].pack_forget()
+        for item in self._filter_items:
+            if item.get("_vis"):
+                item["widget"].pack(**item["pack"])
+
+    def _sync_closed_arrow(self, item):
+        canvas = item.get("arrow")
+        if canvas is None:
+            return
+        expanded = item["project_id"] in self._show_closed_for
+        canvas.delete("all")
+        if expanded:
+            points = (2, 3, 10, 3, 6, 9)
+        else:
+            points = (3, 2, 3, 10, 9, 6)
+        canvas.create_polygon(*points, fill=theme.TEXT_MUTED, outline="")
 
     # ------------------------------------------------------------------
     def get_armed_activity(self) -> Optional[Activity]:
@@ -166,7 +327,29 @@ class Sidebar(tk.Frame):
         self._projects = self.db.list_projects()
         self._render_rows()
 
+    def set_content_width(self, sidebar_px: int):
+        """Keep QDM names wrapping to the current sash width without
+        rebuilding every row on each drag pixel."""
+        if self.collapsed:
+            return
+        sidebar_px = int(sidebar_px)
+        if sidebar_px == int(self._sidebar_px):
+            return
+        self._sidebar_px = sidebar_px
+        wrap = self._name_wraplength()
+        for lbl in self._name_labels:
+            try:
+                lbl.configure(wraplength=wrap)
+            except tk.TclError:
+                pass
+
+    def _name_wraplength(self) -> int:
+        return max(80, int(self._sidebar_px) - _NAME_WRAP_CHROME_PX)
+
     def _render_rows(self):
+        self._name_labels = []
+        self._filter_items = []
+        self._empty_search = None
         for child in self.list_frame.winfo_children():
             child.destroy()
 
@@ -174,10 +357,13 @@ class Sidebar(tk.Frame):
             self._render_collapsed_rail()
             return
 
-        if not self._activities and not self._projects:
-            tk.Label(self.list_frame, text="No QDM's yet. Click “+ QDM”.",
-                      fg=theme.TEXT_MUTED, bg=theme.PANEL_BG, wraplength=200,
-                      font=(self.family, 9)).pack(pady=14, padx=8)
+        if not self._activities or not any(not a.is_closed() for a in self._activities):
+            empty = tk.Label(self.list_frame, text="No QDM's yet. Click “+ QDM”.",
+                      fg=theme.TEXT_MUTED, bg=theme.PANEL_BG,
+                      wraplength=self._name_wraplength(),
+                      font=(self.family, 9))
+            empty.pack(pady=14, padx=8)
+            self._name_labels.append(empty)
             self.list_container.bind_wheel_recursive(self.list_frame)
             return
 
@@ -189,17 +375,34 @@ class Sidebar(tk.Frame):
         for project in self._projects:
             assert project.id is not None
             members = by_project.get(project.id, [])
-            self._render_project_header(project, len(members))
-            if not project.collapsed:
-                if members:
-                    for act in members:
-                        self._render_activity_row(act)
-                else:
-                    tk.Label(self.list_frame, text="No activities in this project yet.",
-                              fg=theme.TEXT_MUTED, bg=theme.PANEL_BG,
-                              font=(self.family, 8, "italic")).pack(
-                        anchor="w", padx=(28, 8), pady=(4, 8))
+            if not members:
+                # No ticket assigned to you in this group — hide the empty
+                # epic/project shell (leftover after a sync archived them).
+                continue
+            open_acts = [a for a in members if not a.is_closed()]
+            closed_acts = [a for a in members if a.is_closed()]
+            if not open_acts:
+                # Closed-only groups used to show "(0, 5 closed)" with
+                # nothing to expand into. Hide them; closed tickets still
+                # sit under a group that has open work assigned to you.
+                continue
+            self._render_project_header(project, len(open_acts), len(closed_acts))
+            if open_acts:
+                for act in open_acts:
+                    self._render_activity_row(act)
+            if closed_acts:
+                self._render_closed_toggle(project, len(closed_acts))
+                for act in closed_acts:
+                    self._render_activity_row(act)
 
+        empty = tk.Label(self.list_frame, text="No QDMs match that search.",
+                         fg=theme.TEXT_MUTED, bg=theme.PANEL_BG,
+                         wraplength=self._name_wraplength(),
+                         font=(self.family, 9))
+        self._empty_search = empty
+        self._track(empty, dict(pady=14, padx=8), kind="empty_search")
+
+        self._apply_filter()
         # Belt-and-braces alongside ScrollArea's own auto-rebind-on-resize
         # (see widgets.ScrollArea._on_content_configure) -- collapsing/
         # expanding a project can leave the list's overall height unchanged
@@ -213,6 +416,9 @@ class Sidebar(tk.Frame):
         rail is narrow. Clicking any dot re-expands, same as the round
         button and "QDM's" label above it (and the rest of the rail)."""
         for project in self._projects:
+            if not any(a.project_id == project.id and not a.is_closed()
+                       for a in self._activities):
+                continue
             dot = tk.Canvas(self.list_frame, width=12, height=12, bg=theme.PANEL_BG,
                              highlightthickness=0, cursor="hand2")
             dot.create_oval(1, 1, 11, 11, fill=project.color, outline="")
@@ -222,10 +428,13 @@ class Sidebar(tk.Frame):
 
     def _render_activity_row(self, act: Activity):
         armed = act.id == self.armed_activity_id
+        closed = act.is_closed()
         row_bg = theme.ACCENT_SOFT if armed else theme.PANEL_BG
 
         row = tk.Frame(self.list_frame, bg=row_bg, cursor="hand2")
-        row.pack(fill="x")
+        self._track(row, dict(fill="x", padx=6, pady=(2, 2)),
+                    kind="activity", activity=act, project_id=act.project_id,
+                    closed=closed, haystack=qdm_haystack(act))
 
         # Every Activity lives inside a Project, so it's always indented
         # under that Project's header to keep the grouping visually obvious.
@@ -247,13 +456,33 @@ class Sidebar(tk.Frame):
         dot = tk.Canvas(top_line, width=10, height=10, bg=row_bg, highlightthickness=0)
         dot.create_oval(0, 0, 10, 10, fill=act.color, outline="")
         dot.pack(side="left", padx=(0, 7))
-        name_fg = theme.ACCENT if armed else theme.TEXT_PRIMARY
-        tk.Label(top_line, text=act.name, bg=row_bg, fg=name_fg, anchor="w", justify="left",
-                 wraplength=155 - 18,
-                 font=(self.family, 10, "bold" if armed else "normal")).pack(
-            side="left", fill="x", expand=True)
+        if armed:
+            name_fg = theme.ACCENT
+        elif closed:
+            name_fg = theme.TEXT_MUTED
+        else:
+            name_fg = theme.TEXT_PRIMARY
+        weight = "bold" if armed else "normal"
+        slant = "overstrike" if closed else ""
+        font_style = f"{weight} {slant}".strip()
+        name_lbl = tk.Label(
+            top_line, text=act.name, bg=row_bg, fg=name_fg, anchor="w",
+            justify="left", wraplength=self._name_wraplength(),
+            font=(self.family, 10, font_style))
+        name_lbl.pack(side="left", fill="x", expand=True)
+        self._name_labels.append(name_lbl)
+        if closed:
+            badge = tk.Label(
+                top_line, text=(act.jira_status or "Closed").upper(),
+                bg=row_bg, fg=theme.TEXT_MUTED, anchor="e",
+                font=(self.family, 7, "bold"))
+            badge.pack(side="right", padx=(6, 0))
 
         meta_bits = []
+        if closed and act.jira_status:
+            meta_bits.append(act.jira_status)
+        elif closed:
+            meta_bits.append("Closed")
         if act.jira_key:
             meta_bits.append(act.jira_key)
         if act.issue_type:
@@ -261,24 +490,95 @@ class Sidebar(tk.Frame):
         if act.default_duration_minutes:
             meta_bits.append(f"{act.default_duration_minutes} min")
         if meta_bits:
-            tk.Label(content, text="   ·   ".join(meta_bits), bg=row_bg, fg=theme.TEXT_SECONDARY,
+            tk.Label(content, text="   ·   ".join(meta_bits), bg=row_bg,
+                     fg=theme.TEXT_MUTED if closed else theme.TEXT_SECONDARY,
                      anchor="w", font=(self.family, 8)).pack(fill="x", pady=(2, 0))
 
         def bind_all(widget):
-            widget.bind("<Button-1>", lambda e, a=act: self._arm(a))
+            widget.bind("<ButtonPress-1>", lambda e, a=act: self._on_qdm_press(e, a))
+            widget.bind("<B1-Motion>", lambda e, a=act: self._on_qdm_motion(e, a))
+            widget.bind("<ButtonRelease-1>", lambda e, a=act: self._on_qdm_release(e, a))
             widget.bind("<Double-Button-1>", lambda e, a=act: self._edit_activity(a))
             widget.bind("<Button-3>", lambda e, a=act: self._context_menu(e, a))
 
         clickable = [row, content, top_line, dot] + content.winfo_children() + top_line.winfo_children()
         for widget in clickable:
             bind_all(widget)
+        if not armed:
+            self._bind_hover(row, row_bg, theme.SURFACE)
 
-        sep = tk.Frame(self.list_frame, bg=theme.BORDER, height=1)
-        sep.pack(fill="x")
+    def _set_tree_bg(self, widget, bg: str):
+        try:
+            if widget.winfo_class() in ("Frame", "Label", "Canvas"):
+                widget.configure(bg=bg)
+        except tk.TclError:
+            return
+        for child in widget.winfo_children():
+            self._set_tree_bg(child, bg)
 
-    def _render_project_header(self, project: Project, count: int):
+    def _bind_hover(self, row, rest_bg: str, hover_bg: str):
+        if rest_bg == hover_bg:
+            return
+
+        def enter(_event=None):
+            self._set_tree_bg(row, hover_bg)
+
+        def leave(event):
+            try:
+                w = event.widget.winfo_containing(event.x_root, event.y_root)
+            except tk.TclError:
+                w = None
+            cur = w
+            while cur is not None:
+                if cur is row:
+                    return
+                cur = getattr(cur, "master", None)
+            self._set_tree_bg(row, rest_bg)
+
+        def bind(widget):
+            widget.bind("<Enter>", enter, add="+")
+            widget.bind("<Leave>", leave, add="+")
+            for child in widget.winfo_children():
+                bind(child)
+
+        bind(row)
+
+    def _render_closed_toggle(self, project: Project, closed_count: int):
+        expanded = project.id in self._show_closed_for
+        row = tk.Frame(self.list_frame, bg=theme.PANEL_BG, cursor="hand2")
+
+        arrow_canvas = tk.Canvas(row, width=12, height=12, bg=theme.PANEL_BG,
+                                  highlightthickness=0, cursor="hand2")
+        arrow_canvas.pack(side="left", padx=(0, 4), pady=3)
+        if expanded:
+            points = (2, 3, 10, 3, 6, 9)
+        else:
+            points = (3, 2, 3, 10, 9, 6)
+        arrow_canvas.create_polygon(*points, fill=theme.TEXT_MUTED, outline="")
+
+        label = tk.Label(
+            row, text=f"Closed ({closed_count})", bg=theme.PANEL_BG,
+            fg=theme.TEXT_MUTED, font=(self.family, 9, "italic"),
+            cursor="hand2")
+        label.pack(side="left")
+        self._track(row, dict(fill="x", padx=(28, 6), pady=(4, 2)),
+                    kind="closed_toggle", project_id=project.id, arrow=arrow_canvas)
+
+        def toggle(_event=None, p=project):
+            pid = p.id
+            if pid in self._show_closed_for:
+                self._show_closed_for.discard(pid)
+            else:
+                self._show_closed_for.add(pid)
+            self._apply_filter()
+
+        for widget in (row, arrow_canvas, label):
+            widget.bind("<Button-1>", toggle)
+
+    def _render_project_header(self, project: Project, open_count: int, closed_count: int = 0):
         row = tk.Frame(self.list_frame, bg=theme.HEADER_BG)
-        row.pack(fill="x")
+        self._track(row, dict(fill="x", padx=6, pady=(8, 2)),
+                    kind="project", project_id=project.id)
 
         content = tk.Frame(row, bg=theme.HEADER_BG)
         content.pack(side="left", fill="both", expand=True, padx=(6, 8), pady=7)
@@ -310,10 +610,22 @@ class Sidebar(tk.Frame):
         swatch.create_oval(0, 0, 10, 10, fill=project.color, outline="")
         swatch.pack(side="left", padx=(0, 6))
 
-        tk.Label(content, text=project.name, bg=theme.HEADER_BG, fg=theme.TEXT_PRIMARY,
-                 anchor="w", font=(self.family, 10, "bold")).pack(side="left")
-        tk.Label(content, text=f"({count})", bg=theme.HEADER_BG, fg=theme.TEXT_MUTED,
-                 font=(self.family, 8)).pack(side="left", padx=(6, 0))
+        count_bits = []
+        if open_count:
+            count_bits.append(str(open_count))
+        if closed_count:
+            count_bits.append(f"{closed_count} closed")
+        if count_bits:
+            count_lbl = tk.Label(content, text=f"({', '.join(count_bits)})",
+                                 bg=theme.HEADER_BG, fg=theme.TEXT_MUTED,
+                                 font=(self.family, 8))
+            count_lbl.pack(side="right", padx=(6, 0))
+        name_lbl = tk.Label(
+            content, text=project.name, bg=theme.HEADER_BG, fg=theme.TEXT_PRIMARY,
+            anchor="w", justify="left", wraplength=self._name_wraplength(),
+            font=(self.family, 10, "bold"))
+        name_lbl.pack(side="left", fill="x", expand=True)
+        self._name_labels.append(name_lbl)
 
         def bind_edit_and_menu(widget):
             widget.bind("<Double-Button-1>", lambda e, p=project: self._edit_project(p))
@@ -321,9 +633,7 @@ class Sidebar(tk.Frame):
 
         for widget in [row, content] + content.winfo_children():
             bind_edit_and_menu(widget)
-
-        sep = tk.Frame(self.list_frame, bg=theme.BORDER, height=1)
-        sep.pack(fill="x")
+        self._bind_hover(row, theme.HEADER_BG, theme.SURFACE)
 
     # ------------------------------------------------------------------
     # Activities
@@ -332,6 +642,48 @@ class Sidebar(tk.Frame):
         self.armed_activity_id = None if self.armed_activity_id == activity.id else activity.id
         self._render_rows()
         self.on_change()
+
+    def _on_qdm_press(self, event, activity: Activity):
+        self._row_press = {
+            "activity": activity,
+            "x": event.x_root,
+            "y": event.y_root,
+            "moved": False,
+            "dropping": False,
+        }
+
+    def _on_qdm_motion(self, event, activity: Activity):
+        press = self._row_press
+        if press is None or press["activity"].id != activity.id or press["dropping"]:
+            return
+        dx = event.x_root - press["x"]
+        dy = event.y_root - press["y"]
+        if abs(dx) <= config.DRAG_THRESHOLD_PX and abs(dy) <= config.DRAG_THRESHOLD_PX:
+            return
+        press["moved"] = True
+        press["dropping"] = True
+        if self._calendar is not None:
+            self._calendar.begin_qdm_drop(activity, event)
+
+    def _on_qdm_release(self, event, activity: Activity):
+        press = self._row_press
+        self._row_press = None
+        if press is None or press.get("dropping") or press.get("moved"):
+            return
+        self._cancel_pending_arm()
+        self._arm_job = self.after(220, lambda a=activity: self._commit_arm(a))
+
+    def _commit_arm(self, activity: Activity):
+        self._arm_job = None
+        self._arm(activity)
+
+    def _cancel_pending_arm(self):
+        if self._arm_job is not None:
+            try:
+                self.after_cancel(self._arm_job)
+            except tk.TclError:
+                pass
+            self._arm_job = None
 
     def _context_menu(self, event, activity: Activity):
         menu = tk.Menu(self, tearoff=0)
@@ -357,6 +709,7 @@ class Sidebar(tk.Frame):
         self.open_activity_panel(activity=None, on_save=on_save, on_delete=None)
 
     def _edit_activity(self, activity: Activity):
+        self._cancel_pending_arm()
         def on_save(result):
             activity.name = result["name"]
             activity.jira_key = result["jira_key"]

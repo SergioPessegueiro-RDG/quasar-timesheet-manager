@@ -10,14 +10,14 @@ which tab (Timesheet/Template) or which week is currently on screen.
 """
 import tkinter as tk
 from datetime import datetime, timedelta
-from tkinter import messagebox, ttk
+from tkinter import messagebox
 from typing import Callable, List, Optional
 
 from . import theme
 from .db import Database
 from .models import Activity, TimeEntry
 from .time_rounding import round_duration_minutes
-from .widgets import CARD_RADIUS, RoundedButton, RoundedCard
+from .widgets import CARD_RADIUS, RoundedButton, RoundedCard, RoundedCombobox
 
 
 class TimerBar(tk.Frame):
@@ -40,7 +40,7 @@ class TimerBar(tk.Frame):
         self.start_dt: Optional[datetime] = None
         self._tick_job: Optional[str] = None
 
-        card = RoundedCard(self, bg=theme.ACCENT_SOFT, radius=CARD_RADIUS)
+        card = RoundedCard(self, bg=theme.ACCENT_SOFT, radius=CARD_RADIUS, outline=False)
         card.pack(fill="x", padx=20, pady=8)
         inner = tk.Frame(card.body, bg=theme.ACCENT_SOFT)
         inner.pack(fill="x", padx=14, pady=8)
@@ -49,8 +49,8 @@ class TimerBar(tk.Frame):
                  bg=theme.ACCENT_SOFT, fg=theme.TEXT_PRIMARY).pack(side="left", padx=(0, 10))
 
         self.activity_var = tk.StringVar()
-        self.activity_combo = ttk.Combobox(inner, textvariable=self.activity_var,
-                                            state="readonly", width=22)
+        self.activity_combo = RoundedCombobox(inner, textvariable=self.activity_var,
+                                               state="readonly", width=22, bg=theme.ACCENT_SOFT)
         self.activity_combo.pack(side="left", padx=(0, 8))
 
         self.toggle_btn = RoundedButton(inner, text="Start Timer", style="Accent.TButton",
@@ -91,8 +91,7 @@ class TimerBar(tk.Frame):
         # near-zero default (RoundedCard._redraw() draws nothing at all
         # below 2px), which is exactly what made the whole bar disappear.
         self.update_idletasks()
-        inset = max(6, CARD_RADIUS // 2)
-        card.configure(height=inner.winfo_reqheight() + 16 + 2 * inset)
+        card.configure(height=inner.winfo_reqheight() + 16 + 2 * card._inset)
 
         self.refresh_activities()
 

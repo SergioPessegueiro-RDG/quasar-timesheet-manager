@@ -68,33 +68,21 @@ class SummaryPanel(tk.Frame):
 
     # ------------------------------------------------------------------
     def _build_widgets(self):
-        inner = tk.Frame(self, bg=theme.PANEL_BG)
+        inner = tk.Frame(self, bg=theme.APP_BG)
         inner.pack(fill="both", expand=True, padx=16, pady=16)
 
-        # One single cohesive rounded card, same treatment as the
-        # calendar's nav+grid+totals merge -- the nav row and both
-        # breakdown columns live inside one box instead of the content
-        # being the only rounded piece with a plain row floating above
-        # it. Same APP_BG contrast wrapper + wider pad/radius as the
-        # calendar box, for the same reason: the card's own fill matches
-        # `inner`'s PANEL_BG, so it needs a visibly different backdrop and
-        # enough margin for the corners to actually read as curved.
-        card_wrap = tk.Frame(inner, bg=theme.APP_BG)
-        card_wrap.pack(fill="both", expand=True)
-        card = RoundedCard(card_wrap, bg=theme.PANEL_BG, radius=18, pad=16)
+        card = RoundedCard(inner, bg=theme.PANEL_BG, radius=18, pad=18, outline=False)
         card.pack(fill="both", expand=True)
         body = card.body
 
         nav = tk.Frame(body, bg=theme.PANEL_BG)
         nav.pack(fill="x", pady=(0, 10))
 
-        # shadow=True on these -- matches the calendar's nav row, which
-        # reads better with the subtle drop shadow than flat.
-        RoundedButton(nav, text="‹", width=3, style="Nav.TButton", shadow=True,
+        RoundedButton(nav, text="‹", width=3, style="Nav.TButton", compact=True,
                       command=self._prev).pack(side="left")
-        RoundedButton(nav, text="Today", style="Nav.TButton", shadow=True,
+        RoundedButton(nav, text="Today", style="Nav.TButton",
                       command=self._today).pack(side="left", padx=6)
-        RoundedButton(nav, text="›", width=3, style="Nav.TButton", shadow=True,
+        RoundedButton(nav, text="›", width=3, style="Nav.TButton", compact=True,
                       command=self._next).pack(side="left")
 
         self.period_label = tk.Label(nav, text="", font=(self.family, 12, "bold"),
@@ -166,7 +154,7 @@ class SummaryPanel(tk.Frame):
             # which is why it gets a modest capped height instead of
             # splitting the column evenly with the chart; that's what
             # lets the pie itself grow to fill most of the column.
-            legend_area = ScrollArea(frame, bg=theme.PANEL_BG, outline=False, height=150)
+            legend_area = ScrollArea(frame, bg=theme.PANEL_BG, outline=False, pad=0, height=150)
             legend_area.pack(side="bottom", fill="x")
             pie_canvas = tk.Canvas(frame, bg=theme.PANEL_BG, highlightthickness=0)
             pie_canvas.pack(fill="both", expand=True, pady=(0, 10))
@@ -176,7 +164,7 @@ class SummaryPanel(tk.Frame):
             # row -- see _build_bar_row), so there's no separate canvas
             # and this area gets the full column height instead of a
             # capped strip underneath one.
-            legend_area = ScrollArea(frame, bg=theme.PANEL_BG, outline=False)
+            legend_area = ScrollArea(frame, bg=theme.PANEL_BG, outline=False, pad=0)
             legend_area.pack(fill="both", expand=True, pady=(0, 10))
 
         return {
@@ -333,7 +321,8 @@ class SummaryPanel(tk.Frame):
 
         swatch = tk.Canvas(row, width=12, height=12, bg=theme.PANEL_BG, highlightthickness=0)
         swatch.pack(side="left", padx=(0, 8))
-        theme.rounded_rect(swatch, 1, 1, 11, 11, radius=3, fill=r["color"], outline="")
+        theme.place_rounded_rect(swatch, 1, 1, 11, 11, radius=3, fill=r["color"], outline="",
+                                 background=theme.PANEL_BG)
 
         hours = r["minutes"] / 60
         pct = (r["minutes"] / grand_total * 100) if grand_total else 0

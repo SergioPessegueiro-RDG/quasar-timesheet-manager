@@ -6,6 +6,9 @@ color-coded projects, and a one-click Jira CSV export. Everything runs
 locally, with no account, server, or internet connection required; all
 data lives in a single SQLite file on your machine.
 
+Built by [Alex Rae](https://github.com/AlexRae-RDG) with contributions
+from Sérgio Pessegueiro.
+
 ## Install and get started
 
 **This is the fastest way to get going — no Python, no Terminal, no git.**

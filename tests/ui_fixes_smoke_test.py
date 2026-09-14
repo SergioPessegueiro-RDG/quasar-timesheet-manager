@@ -6,8 +6,9 @@ Headless smoke test (Xvfb) for four specific UI fixes:
      window itself) regardless of where the main window is sitting or what
      the window manager does with pop-ups -- and only one such tab is ever
      shown at a time, alongside "Timesheet".
-  2. The Activities sidebar stretches when the main window is resized,
-     instead of staying pinned at a fixed pixel width.
+  2. The Activities sidebar can be dragged wider via the sash so long
+     QDM names stay readable; widening the window itself leaves the
+     sidebar at the chosen width and gives extra space to the calendar.
   3. Nothing at the bottom of the calendar (hour labels, daily totals) is
      clipped -- there's real pixel room below the last gridline/row.
   4. The Activities sidebar's scrollbar actually scrolls, including via the
@@ -130,7 +131,7 @@ check("Back to the Timesheet tab after closing everything",
 check("Template tab stayed visible the whole time (never auto-hidden like the other panels)",
       str(win.notebook.tab(win.template_calendar.master, "state")) == "normal")
 
-print("\n--- Sidebar stretches when the main window is resized ---")
+print("\n--- Sidebar width is user-chosen (sash), not window-proportional ---")
 narrow_width = win.sidebar.winfo_width()
 check(f"Sidebar respects the minimum width at 1100px window (got {narrow_width})",
       narrow_width >= config.MIN_SIDEBAR_WIDTH_PX - 2)
@@ -138,8 +139,15 @@ check(f"Sidebar respects the minimum width at 1100px window (got {narrow_width})
 win.geometry("1800x900+20+20")
 win.update()
 wide_width = win.sidebar.winfo_width()
-check(f"Sidebar grows when the window is widened (narrow={narrow_width}, wide={wide_width})",
-      wide_width > narrow_width + 20)
+check(f"Sidebar stays put when the window is widened (narrow={narrow_width}, wide={wide_width})",
+      abs(wide_width - narrow_width) < 40)
+
+win.sidebar_width = min(config.MAX_SIDEBAR_WIDTH_PX, int(narrow_width) + 120)
+win._apply_sidebar_column_width()
+win.update()
+dragged = win.sidebar.winfo_width()
+check(f"Widening via the sash grows the sidebar (was {narrow_width}, now {dragged})",
+      dragged > narrow_width + 40)
 
 calendar_narrow_dw = win.calendar.day_width
 win.update()
@@ -157,8 +165,8 @@ rows = [w for w in win.sidebar.list_frame.winfo_children() if w.winfo_class() ==
 if rows:
     row_w = rows[0].winfo_width()
     canvas_w = [c for c in win.sidebar.winfo_children()][0]
-    check(f"An activity row stretches close to the sidebar's width (row={row_w}, sidebar={wide_width})",
-          row_w >= wide_width - 60)
+    check(f"An activity row stretches close to the sidebar's width (row={row_w}, sidebar={dragged})",
+          row_w >= dragged - 60)
 
 print("\n--- Activities sidebar scrolls (scrollbar + mouse wheel) once it overflows ---")
 # Shrink back down and pile in enough projects/activities that the list
@@ -431,14 +439,12 @@ if bbox:
     check(f"Drawn content bottom ({content_bottom}) fits within the canvas height ({canvas_h})",
           content_bottom <= canvas_h)
 
-gutter_h = win.calendar.total_gutter_frame.winfo_height()
-check(f"Totals-row gutter frame has real height, not collapsed (got {gutter_h}px)",
+gutter_h = win.calendar._totals_host.winfo_height()
+check(f"Totals canvas has real height, not collapsed (got {gutter_h}px)",
       gutter_h >= config.TOTALS_ROW_HEIGHT_PX - 2)
-for i, col in enumerate(win.calendar.total_col_frames):
-    col_h = col.winfo_height()
-    lbl_reqh = win.calendar.total_labels[i].winfo_reqheight()
-    check(f"Totals column {i} frame ({col_h}px) is tall enough for its label ({lbl_reqh}px)",
-          col_h >= lbl_reqh)
+total_items = win.calendar._totals_host.find_withtag("total")
+check(f"Totals canvas drew a label for each day (got {len(total_items)})",
+      len(total_items) >= len(config.DAY_NAMES))
 
 win.destroy()
 

@@ -23,7 +23,7 @@ from typing import Callable, Dict, List, Optional, Union
 from . import config, theme
 from .models import Activity, Project, TemplateEntry, TimeEntry
 from .version import APP_VERSION
-from .widgets import RoundedButton, ScrollArea, show_saved_toast
+from .widgets import RoundedButton, RoundedCombobox, ScrollArea, show_saved_toast
 
 EntryLike = Union[TimeEntry, TemplateEntry]
 
@@ -255,8 +255,8 @@ class ActivityPanel(tk.Frame):
 
         ttk.Label(frm, text="Project", style="Big.TLabel").grid(row=row, column=0, sticky="w", pady=10)
         self.project_var = tk.StringVar()
-        self.project_combo = ttk.Combobox(frm, textvariable=self.project_var,
-                                           state="readonly", width=30, style="Big.TCombobox")
+        self.project_combo = RoundedCombobox(frm, textvariable=self.project_var,
+                                              state="readonly", width=30, style="Big.TCombobox")
         self.project_combo.grid(row=row, column=1, sticky="ew", pady=10)
         self.project_combo.bind("<<ComboboxSelected>>", self._on_project_changed)
         self.project_combo.bind("<Return>", lambda e: self._save())
@@ -510,7 +510,9 @@ class ProjectPanel(tk.Frame):
 
     def _draw_swatch(self):
         self.swatch.delete("all")
-        theme.rounded_rect(self.swatch, 2, 2, 24, 24, radius=5, fill=self.selected_color.get(), outline="")
+        theme.place_rounded_rect(self.swatch, 2, 2, 24, 24, radius=5,
+                                 fill=self.selected_color.get(), outline="",
+                                 background=self.swatch.cget("bg"))
 
     def _set_color(self, color):
         self.selected_color.set(color)
@@ -570,6 +572,8 @@ class SettingsPanel(tk.Frame):
         self._custom_seeds_on_load: Dict[str, str] = dict(self.custom_seeds)
         self.custom_swatch_canvases: Dict[str, tk.Canvas] = {}
         self.custom_controls_frame: Optional[tk.Frame] = None
+        self.glass_alpha_frame: Optional[tk.Frame] = None
+        self._glass_alpha_on_load = theme.get_glass_alpha()
 
         # The theme preview grid plus every field below it can run
         # taller than a smaller (non-maximized) window -- see _scroll_body.
@@ -630,15 +634,71 @@ class SettingsPanel(tk.Frame):
         ttk.Entry(left, textvariable=self.display_name_var, width=36, style="Big.TEntry").grid(
             row=2, column=0, sticky="ew", pady=(0, 28))
 
-        ttk.Label(left, text="Work Hours", style="Heading.TLabel").grid(
+        ttk.Label(left, text="Jira", style="Heading.TLabel").grid(
             row=3, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        tk.Label(left, text="Which hours the calendar grid shows, and whether it includes "
-                            "Saturday/Sunday. Applies to the Timesheet and Template tabs alike.",
+        tk.Label(left, text="Paste an API token (Atlassian account → Security → API tokens). "
+                            "Site URL can be https://your-company.atlassian.net or any "
+                            "dashboard / board link — extra path is stripped. Sync pulls "
+                            "open QDMs assigned to you. The token never leaves this machine.",
                  fg=theme.TEXT_MUTED, bg=theme.PANEL_BG, justify="left", wraplength=420,
                  font=(self.family, 9)).grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
+        jira_fields = tk.Frame(left, bg=theme.PANEL_BG)
+        jira_fields.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        jira_fields.columnconfigure(1, weight=1)
+
+        ttk.Label(jira_fields, text="Site URL").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self.jira_url_var = tk.StringVar()
+        ttk.Entry(jira_fields, textvariable=self.jira_url_var, width=36, style="Big.TEntry").grid(
+            row=0, column=1, sticky="ew", padx=(12, 0), pady=(0, 6))
+        tk.Label(jira_fields, text="https://your-company.atlassian.net  — a dashboard link is fine too",
+                 fg=theme.TEXT_MUTED, bg=theme.PANEL_BG, font=(self.family, 8)).grid(
+            row=1, column=1, sticky="w", padx=(12, 0), pady=(0, 10))
+
+        ttk.Label(jira_fields, text="Email").grid(row=2, column=0, sticky="w", pady=(0, 6))
+        self.jira_email_var = tk.StringVar()
+        ttk.Entry(jira_fields, textvariable=self.jira_email_var, width=36, style="Big.TEntry").grid(
+            row=2, column=1, sticky="ew", padx=(12, 0), pady=(0, 12))
+
+        ttk.Label(jira_fields, text="API token").grid(row=3, column=0, sticky="w", pady=(0, 6))
+        token_row = tk.Frame(jira_fields, bg=theme.PANEL_BG)
+        token_row.grid(row=3, column=1, sticky="ew", padx=(12, 0), pady=(0, 12))
+        token_row.columnconfigure(0, weight=1)
+        self.jira_token_var = tk.StringVar()
+        self.jira_token_entry = ttk.Entry(token_row, textvariable=self.jira_token_var,
+                                           width=28, style="Big.TEntry", show="•")
+        self.jira_token_entry.pack(side="left", fill="x", expand=True)
+        self._jira_token_visible = False
+        RoundedButton(token_row, text="Show", style="Secondary.TButton",
+                      command=self._toggle_jira_token).pack(side="left", padx=(8, 0))
+
+        ttk.Label(jira_fields, text="Project key").grid(row=4, column=0, sticky="w", pady=(0, 6))
+        self.jira_project_key_var = tk.StringVar(value="QDM")
+        ttk.Entry(jira_fields, textvariable=self.jira_project_key_var, width=12,
+                  style="Big.TEntry").grid(row=4, column=1, sticky="w", padx=(12, 0), pady=(0, 12))
+
+        jira_btns = tk.Frame(jira_fields, bg=theme.PANEL_BG)
+        jira_btns.grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        RoundedButton(jira_btns, text="Test connection", style="Secondary.TButton",
+                      command=self._test_jira).pack(side="left")
+        RoundedButton(jira_btns, text="Sync QDMs now", style="Accent.TButton",
+                      command=self._sync_jira).pack(side="left", padx=(8, 0))
+        self.jira_status_label = tk.Label(jira_fields, text="", fg=theme.TEXT_SECONDARY,
+                                           bg=theme.PANEL_BG, font=(self.family, 9),
+                                           wraplength=420, justify="left")
+        self.jira_status_label.grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 18))
+        self.on_test_jira: Optional[Callable[[dict], None]] = None
+        self.on_sync_jira: Optional[Callable[[dict], None]] = None
+
+        ttk.Label(left, text="Work Hours", style="Heading.TLabel").grid(
+            row=6, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        tk.Label(left, text="Which hours the calendar grid shows, and whether it includes "
+                            "Saturday/Sunday. Applies to the Timesheet and Template tabs alike.",
+                 fg=theme.TEXT_MUTED, bg=theme.PANEL_BG, justify="left", wraplength=420,
+                 font=(self.family, 9)).grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
         hours_row = tk.Frame(left, bg=theme.PANEL_BG)
-        hours_row.grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 14))
+        hours_row.grid(row=8, column=0, columnspan=2, sticky="w", pady=(0, 14))
         # Index-based (not string-parsed) round trip: each Combobox's
         # `values` is a list of display labels ("9 AM", etc.); the actual
         # hour that label maps to is looked up by matching index in the
@@ -652,22 +712,22 @@ class SettingsPanel(tk.Frame):
 
         ttk.Label(hours_row, text="From", style="Big.TLabel").pack(side="left")
         self.work_start_var = tk.StringVar()
-        self.work_start_combo = ttk.Combobox(hours_row, textvariable=self.work_start_var,
-                                              values=start_labels, state="readonly", width=8,
-                                              style="Big.TCombobox")
+        self.work_start_combo = RoundedCombobox(hours_row, textvariable=self.work_start_var,
+                                                 values=start_labels, state="readonly", width=8,
+                                                 style="Big.TCombobox")
         self.work_start_combo.pack(side="left", padx=(8, 20))
 
         ttk.Label(hours_row, text="To", style="Big.TLabel").pack(side="left")
         self.work_end_var = tk.StringVar()
-        self.work_end_combo = ttk.Combobox(hours_row, textvariable=self.work_end_var,
-                                            values=end_labels, state="readonly", width=8,
-                                            style="Big.TCombobox")
+        self.work_end_combo = RoundedCombobox(hours_row, textvariable=self.work_end_var,
+                                               values=end_labels, state="readonly", width=8,
+                                               style="Big.TCombobox")
         self.work_end_combo.pack(side="left", padx=(8, 0))
 
         self.show_weekends_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(left, text="Show weekends (Saturday & Sunday)",
                          variable=self.show_weekends_var, style="Big.TCheckbutton").grid(
-            row=6, column=0, columnspan=2, sticky="w", pady=(0, 14))
+            row=9, column=0, columnspan=2, sticky="w", pady=(0, 14))
 
         # Checked = hidden (not "shown"): this is an opt-*in* away from the
         # default, so "Hide the Timer bar" reads more naturally as the
@@ -677,19 +737,19 @@ class SettingsPanel(tk.Frame):
         self.hide_timer_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(left, text="Hide the Timer bar",
                          variable=self.hide_timer_var, style="Big.TCheckbutton").grid(
-            row=7, column=0, columnspan=2, sticky="w", pady=(0, 2))
+            row=10, column=0, columnspan=2, sticky="w", pady=(0, 2))
         tk.Label(left, text="Frees up space above the calendar. Turn back on here any time.",
                  fg=theme.TEXT_MUTED, bg=theme.PANEL_BG, justify="left", wraplength=420,
-                 font=(self.family, 9)).grid(row=8, column=0, columnspan=2, sticky="w", pady=(0, 20))
+                 font=(self.family, 9)).grid(row=11, column=0, columnspan=2, sticky="w", pady=(0, 20))
 
         ttk.Label(left, text="Heading", style="Heading.TLabel").grid(
-            row=9, column=0, columnspan=2, sticky="w", pady=(0, 6))
+            row=12, column=0, columnspan=2, sticky="w", pady=(0, 6))
         tk.Label(left, text="Standard shows the full title bar. Compact shrinks it. Hidden "
                             "removes it -- the calendar gets that space back either way.",
                  fg=theme.TEXT_MUTED, bg=theme.PANEL_BG, justify="left", wraplength=420,
-                 font=(self.family, 9)).grid(row=10, column=0, columnspan=2, sticky="w", pady=(0, 8))
+                 font=(self.family, 9)).grid(row=13, column=0, columnspan=2, sticky="w", pady=(0, 8))
         self.header_style_row = tk.Frame(left, bg=theme.PANEL_BG)
-        self.header_style_row.grid(row=11, column=0, columnspan=2, sticky="w", pady=(0, 28))
+        self.header_style_row.grid(row=14, column=0, columnspan=2, sticky="w", pady=(0, 28))
         self.header_style_choice = "standard"
         self.header_style_buttons: Dict[str, RoundedButton] = {}
         for key, label in (("standard", "Standard"), ("compact", "Compact"), ("hidden", "Hidden")):
@@ -699,14 +759,14 @@ class SettingsPanel(tk.Frame):
             self.header_style_buttons[key] = btn
 
         ttk.Label(left, text="Theme", style="Heading.TLabel").grid(
-            row=12, column=0, columnspan=2, sticky="w", pady=(0, 6))
+            row=15, column=0, columnspan=2, sticky="w", pady=(0, 6))
         self.theme_description_label = tk.Label(
             left, text="", fg=theme.TEXT_MUTED, bg=theme.PANEL_BG, justify="left",
             wraplength=480, font=(self.family, 9))
-        self.theme_description_label.grid(row=13, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        self.theme_description_label.grid(row=16, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
         self.theme_grid = ttk.Frame(left)
-        self.theme_grid.grid(row=14, column=0, columnspan=2, sticky="w", pady=(0, 12))
+        self.theme_grid.grid(row=17, column=0, columnspan=2, sticky="w", pady=(0, 12))
         self._build_theme_grid()
 
         # Only visible while "Custom" is the selected card above (toggled
@@ -714,8 +774,13 @@ class SettingsPanel(tk.Frame):
         # remembers the row/col/sticky/pady for automatically -- no need
         # to repeat them at toggle time).
         self.custom_controls_frame = tk.Frame(left, bg=theme.PANEL_BG)
-        self.custom_controls_frame.grid(row=15, column=0, columnspan=2, sticky="w", pady=(0, 16))
+        self.custom_controls_frame.grid(row=18, column=0, columnspan=2, sticky="w", pady=(0, 16))
         self._build_custom_controls()
+
+        self.glass_alpha_frame = tk.Frame(left, bg=theme.PANEL_BG)
+        self.glass_alpha_frame.grid(row=19, column=0, columnspan=2, sticky="ew", pady=(0, 16))
+        left.columnconfigure(0, weight=1)
+        self._build_glass_alpha_controls()
 
         ttk.Label(right, text="Keyboard Shortcuts", style="Heading.TLabel").grid(
             row=0, column=0, sticky="w", pady=(0, 10))
@@ -733,6 +798,9 @@ class SettingsPanel(tk.Frame):
         tk.Label(right, text=f"QUASAR Timesheet Manager v{APP_VERSION}",
                  font=(self.family, 9), bg=theme.PANEL_BG, fg=theme.TEXT_MUTED).grid(
             row=2, column=0, sticky="w", pady=(20, 0))
+        tk.Label(right, text="Alex Rae  ·  Sérgio Pessegueiro",
+                 font=(self.family, 9), bg=theme.PANEL_BG, fg=theme.TEXT_MUTED).grid(
+            row=3, column=0, sticky="w", pady=(2, 0))
 
         # row=20 (not row=2) so this stays below Keyboard Shortcuts either
         # way -- beside the settings fields at row=1 (the normal, wide-
@@ -744,6 +812,26 @@ class SettingsPanel(tk.Frame):
         btns.grid(row=20, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         RoundedButton(btns, text="Cancel", style="Secondary.TButton", command=self._cancel).pack(side="right")
         RoundedButton(btns, text="Save", style="Accent.TButton", command=self._save).pack(side="right", padx=6)
+
+    def _toggle_jira_token(self):
+        self._jira_token_visible = not self._jira_token_visible
+        self.jira_token_entry.configure(show="" if self._jira_token_visible else "•")
+
+    def jira_fields(self) -> dict:
+        return {
+            "site_url": self.jira_url_var.get().strip(),
+            "email": self.jira_email_var.get().strip(),
+            "api_token": self.jira_token_var.get().strip(),
+            "project_key": (self.jira_project_key_var.get().strip() or "QDM"),
+        }
+
+    def _test_jira(self):
+        if self.on_test_jira is not None:
+            self.on_test_jira(self.jira_fields())
+
+    def _sync_jira(self):
+        if self.on_sync_jira is not None:
+            self.on_sync_jira(self.jira_fields())
 
     def _select_header_style(self, key: str):
         """Click handler for the Standard/Compact/Hidden segmented row --
@@ -793,18 +881,31 @@ class SettingsPanel(tk.Frame):
             right.grid_configure(row=1, column=1, columnspan=1, pady=0)
 
     def _build_theme_grid(self):
-        # A fixed 4-columns-wide grid of theme preview cards -- "System"
-        # first, then the eighteen curated palettes, then a "Custom" card
-        # at the end, wrapping to a tidy 4-per-row layout. Built once (not
-        # rebuilt on every load()); only the selection ring and
-        # description text change after that, via
+        # Sectioned like TickTick's Appearance picker: a heading whenever
+        # the category changes, then a 4-column grid of preview cards.
+        # "System" first, then the curated palettes in THEME_ORDER, then
+        # "Custom". Built once (not rebuilt on every load()); only the
+        # selection ring and description text change after that, via
         # _refresh_theme_selection().
         cols = 4
         ids = list(theme.THEME_ORDER) + [theme.CUSTOM_THEME_ID]
-        for i, theme_id in enumerate(ids):
-            row, col = divmod(i, cols)
+        grid_row = 0
+        col = 0
+        prev_cat = None
+        for theme_id in ids:
+            cat = theme.get_theme(theme_id).get("category") or ""
+            if cat != prev_cat:
+                if col != 0:
+                    grid_row += 1
+                    col = 0
+                heading = tk.Label(self.theme_grid, text=cat, font=(self.family, 10, "bold"),
+                                    bg=theme.PANEL_BG, fg=theme.TEXT_SECONDARY, anchor="w")
+                heading.grid(row=grid_row, column=0, columnspan=cols, sticky="w",
+                             padx=6, pady=(14 if prev_cat else 0, 4))
+                grid_row += 1
+                prev_cat = cat
             cell = tk.Frame(self.theme_grid, bg=theme.PANEL_BG)
-            cell.grid(row=row, column=col, padx=6, pady=6)
+            cell.grid(row=grid_row, column=col, padx=6, pady=6)
 
             canvas = tk.Canvas(cell, width=132, height=88, bg=theme.PANEL_BG, highlightthickness=0,
                                 cursor="hand2")
@@ -816,6 +917,10 @@ class SettingsPanel(tk.Frame):
                               bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY, cursor="hand2")
             label.pack(pady=(4, 0))
             label.bind("<Button-1>", lambda e, tid=theme_id: self._select_theme(tid))
+            col += 1
+            if col >= cols:
+                col = 0
+                grid_row += 1
 
     def _build_custom_controls(self):
         """Four color pickers (Background, Panel, Text, Accent) that make
@@ -846,11 +951,56 @@ class SettingsPanel(tk.Frame):
                           command=lambda k=key: self._pick_custom_color(k)).pack(side="left")
         self._draw_custom_swatches()
 
+    def _build_glass_alpha_controls(self):
+        """Slider for Frosted / Picom / Hypr — how see-through the window
+        is. Floor stays high enough that text remains readable."""
+        tk.Label(self.glass_alpha_frame, text="Translucency",
+                 font=(self.family, 10, "bold"), bg=theme.PANEL_BG,
+                 fg=theme.TEXT_PRIMARY).pack(anchor="w")
+        tk.Label(self.glass_alpha_frame,
+                 text="How much of the desktop shows through. Solid is fully opaque; "
+                      "the left end stays readable — never fully transparent.",
+                 fg=theme.TEXT_MUTED, bg=theme.PANEL_BG, justify="left", wraplength=480,
+                 font=(self.family, 9)).pack(anchor="w", pady=(2, 8))
+        row = tk.Frame(self.glass_alpha_frame, bg=theme.PANEL_BG)
+        row.pack(fill="x")
+        tk.Label(row, text="See-through", font=(self.family, 8),
+                 bg=theme.PANEL_BG, fg=theme.TEXT_MUTED).pack(side="left")
+        self.glass_alpha_label = tk.Label(row, text="", font=(self.family, 9, "bold"),
+                                          bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY)
+        self.glass_alpha_label.pack(side="right")
+        tk.Label(row, text="Solid", font=(self.family, 8),
+                 bg=theme.PANEL_BG, fg=theme.TEXT_MUTED).pack(side="right", padx=(0, 12))
+        lo = int(round(theme.WINDOW_ALPHA_MIN * 100))
+        hi = int(round(theme.WINDOW_ALPHA_MAX * 100))
+        self.glass_alpha_var = tk.DoubleVar(value=theme.get_glass_alpha() * 100)
+        self.glass_alpha_scale = tk.Scale(
+            self.glass_alpha_frame, from_=lo, to=hi, orient="horizontal",
+            showvalue=0, resolution=1, length=360,
+            bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY, highlightthickness=0,
+            troughcolor=theme.FIELD_BG, activebackground=theme.ACCENT,
+            sliderrelief="flat", bd=0, command=self._on_glass_alpha)
+        self.glass_alpha_scale.pack(fill="x", pady=(4, 0))
+        self._sync_glass_alpha_label(theme.get_glass_alpha())
+
+    def _sync_glass_alpha_label(self, alpha: float):
+        pct = int(round(alpha * 100))
+        self.glass_alpha_label.config(text=f"{pct}% opaque")
+
+    def _on_glass_alpha(self, value):
+        alpha = theme.set_glass_alpha(float(value) / 100.0)
+        self._sync_glass_alpha_label(alpha)
+        try:
+            theme.apply_window_opacity(self.winfo_toplevel(), self.theme_var.get())
+        except tk.TclError:
+            pass
+
     def _draw_custom_swatches(self):
         for key, canvas in self.custom_swatch_canvases.items():
             canvas.delete("all")
-            theme.rounded_rect(canvas, 2, 2, 26, 26, radius=6,
-                                fill=self.custom_seeds[key], outline=theme.BORDER_STRONG)
+            theme.place_rounded_rect(canvas, 2, 2, 26, 26, radius=6,
+                                     fill=self.custom_seeds[key], outline=theme.BORDER_STRONG,
+                                     background=canvas.cget("bg"))
 
     def _pick_custom_color(self, key: str):
         # Native OS color picker, same as ProjectPanel's -- not one of our
@@ -883,6 +1033,11 @@ class SettingsPanel(tk.Frame):
                 self.custom_controls_frame.grid()
             else:
                 self.custom_controls_frame.grid_remove()
+        if self.glass_alpha_frame is not None:
+            if theme.is_glass_theme(selected):
+                self.glass_alpha_frame.grid()
+            else:
+                self.glass_alpha_frame.grid_remove()
 
     @staticmethod
     def _format_hour(hour_0_23: int) -> str:
@@ -894,13 +1049,30 @@ class SettingsPanel(tk.Frame):
 
     def load(self, display_name: str, current_theme_id: str, work_start_hour: int,
               work_end_hour: int, show_weekends: bool, show_timer_bar: bool, header_style: str,
-              on_save: Callable[[str, str, int, int, bool, bool, str], None]):
+              on_save: Callable, jira_site_url: str = "", jira_email: str = "",
+              jira_api_token: str = "", jira_project_key: str = "QDM",
+              on_test_jira: Optional[Callable[[dict], None]] = None,
+              on_sync_jira: Optional[Callable[[dict], None]] = None):
         self.on_save = on_save
+        self.on_test_jira = on_test_jira
+        self.on_sync_jira = on_sync_jira
         self.display_name_var.set(display_name)
+        self.jira_url_var.set(jira_site_url)
+        self.jira_email_var.set(jira_email)
+        self.jira_token_var.set(jira_api_token)
+        self.jira_project_key_var.set(jira_project_key or "QDM")
+        if jira_api_token:
+            self.jira_status_label.config(text="Token saved locally. Test the connection, then Sync QDMs.")
+        else:
+            self.jira_status_label.config(text="No token yet — paste one above, or set QUASAR_JIRA_TOKEN.")
         self.theme_var.set(theme.resolve_theme_id(current_theme_id))
         self.custom_seeds = theme.get_custom_seeds()
         self._custom_seeds_on_load = dict(self.custom_seeds)
         self._draw_custom_swatches()
+        self._glass_alpha_on_load = theme.get_glass_alpha()
+        if hasattr(self, "glass_alpha_var"):
+            self.glass_alpha_var.set(self._glass_alpha_on_load * 100)
+            self._sync_glass_alpha_label(self._glass_alpha_on_load)
         self._refresh_theme_selection()
 
         start_idx = self._start_hour_values.index(work_start_hour) if work_start_hour in self._start_hour_values else 9
@@ -930,6 +1102,7 @@ class SettingsPanel(tk.Frame):
             self.show_weekends_var.get(),
             not self.hide_timer_var.get(),
             self.header_style_choice,
+            self.jira_fields(),
         )
         show_saved_toast(self)
         self.on_close()
@@ -941,6 +1114,12 @@ class SettingsPanel(tk.Frame):
         # it was never actually applied or persisted.
         if self.custom_seeds != self._custom_seeds_on_load:
             theme.set_custom_seeds(**self._custom_seeds_on_load)
+        if abs(theme.get_glass_alpha() - self._glass_alpha_on_load) > 0.001:
+            theme.set_glass_alpha(self._glass_alpha_on_load)
+            try:
+                theme.apply_window_opacity(self.winfo_toplevel())
+            except tk.TclError:
+                pass
         self.on_close()
 
 
@@ -1028,14 +1207,19 @@ class ExportPanel(tk.Frame):
         self.family = family
         self.on_close = on_close
         self.on_export: Optional[Callable[[str, str], None]] = None
+        self.on_push: Optional[Callable[[str, str], None]] = None
         self.week_start: Optional[date] = None
 
         body = _scroll_body(self)
         outer = tk.Frame(body, bg=theme.PANEL_BG)
         outer.pack(fill="both", expand=True, padx=28, pady=24)
 
-        tk.Label(outer, text="Export to Jira CSV", font=(self.family, 14, "bold"),
-                 bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY).pack(anchor="w", pady=(0, 16))
+        tk.Label(outer, text="Log hours to Jira", font=(self.family, 16, "bold"),
+                 bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY).pack(anchor="w", pady=(0, 6))
+        tk.Label(outer, text="Push worklogs straight to each QDM. CSV export is still here "
+                             "as a fallback. Only blocks with a Jira Issue Key are sent.",
+                 font=(self.family, 10), bg=theme.PANEL_BG, fg=theme.TEXT_SECONDARY,
+                 wraplength=520, justify="left").pack(anchor="w", pady=(0, 16))
 
         frm = ttk.Frame(outer)
         frm.pack(anchor="w")
@@ -1065,12 +1249,16 @@ class ExportPanel(tk.Frame):
         btns = ttk.Frame(frm)
         btns.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(12, 0))
         RoundedButton(btns, text="Cancel", style="Secondary.TButton", command=self._cancel).pack(side="right")
-        RoundedButton(btns, text="Export…", style="Accent.TButton", command=self._export).pack(
+        RoundedButton(btns, text="Export CSV…", style="Secondary.TButton", command=self._export).pack(
             side="right", padx=6)
+        RoundedButton(btns, text="Push to Jira", style="Accent.TButton", command=self._push).pack(
+            side="right", padx=(0, 6))
 
-    def load(self, week_start: date, on_export: Callable[[str, str], None]):
+    def load(self, week_start: date, on_export: Callable[[str, str], None],
+              on_push: Optional[Callable[[str, str], None]] = None):
         self.week_start = week_start
         self.on_export = on_export
+        self.on_push = on_push
         self.scope_var.set("week")
         # config.week_end_offset() is 4 for a plain Mon-Fri week, 6 once
         # Settings' "Show weekends" is on -- matches whatever the
@@ -1090,26 +1278,45 @@ class ExportPanel(tk.Frame):
         self.from_entry.config(state=state)
         self.to_entry.config(state=state)
 
-    def _export(self):
+    def _selected_range(self) -> Optional[tuple]:
         assert self.week_start is not None
         if self.scope_var.get() == "week":
             start = self.week_start.isoformat()
             end = (self.week_start + timedelta(days=config.week_end_offset())).isoformat()
-        else:
-            start = self.from_var.get().strip()
-            end = self.to_var.get().strip()
-            try:
-                date.fromisoformat(start)
-                date.fromisoformat(end)
-            except ValueError:
-                self.error_label.config(text="Dates must be in YYYY-MM-DD format.")
-                return
-            if start > end:
-                self.error_label.config(text="'From' date must be before 'To' date.")
-                return
+            return start, end
+        start = self.from_var.get().strip()
+        end = self.to_var.get().strip()
+        try:
+            date.fromisoformat(start)
+            date.fromisoformat(end)
+        except ValueError:
+            self.error_label.config(text="Dates must be in YYYY-MM-DD format.")
+            return None
+        if start > end:
+            self.error_label.config(text="'From' date must be before 'To' date.")
+            return None
+        return start, end
+
+    def _export(self):
+        selected = self._selected_range()
+        if selected is None:
+            return
+        start, end = selected
         cb = self.on_export
         self.on_close()
         assert cb is not None
+        cb(start, end)
+
+    def _push(self):
+        selected = self._selected_range()
+        if selected is None:
+            return
+        start, end = selected
+        cb = self.on_push
+        if cb is None:
+            self.error_label.config(text="Push to Jira isn't wired up in this build.")
+            return
+        self.on_close()
         cb(start, end)
 
     def _cancel(self):

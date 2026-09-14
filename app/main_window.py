@@ -5,10 +5,12 @@ import sys
 import threading
 import time
 import tkinter as tk
+import traceback
 import webbrowser
 from tkinter import messagebox, ttk
+from typing import Optional
 
-from . import auto_update, config, theme, update_check
+from . import auto_update, config, jira_client, jira_sync, theme, update_check
 from .calendar_view import CalendarGrid
 from .db import Database
 from .export_csv import export_entries
@@ -19,7 +21,7 @@ from .summary_panel import SummaryPanel
 from .timeblock_panel import TimeBlockPanel
 from .timer_bar import TimerBar
 from .version import APP_VERSION
-from .widgets import RoundedButton
+from .widgets import RoundedButton, RoundedCombobox
 
 
 class MainWindow(tk.Tk):
@@ -28,7 +30,7 @@ class MainWindow(tk.Tk):
         self.title("QUASAR Timesheet Manager")
         self.geometry("1240x780")
         self.minsize(1000, 640)
-        self._maximize_on_start()
+        self._center_on_start()
         self._log_startup_diagnostics()
 
         self.db = Database()
@@ -47,6 +49,9 @@ class MainWindow(tk.Tk):
 
         saved_theme = self.db.get_setting("theme_mode", theme.DEFAULT_THEME_ID) or theme.DEFAULT_THEME_ID
         theme.set_theme(saved_theme)
+
+        saved_alpha = self.db.get_setting("glass_alpha", str(theme.WINDOW_ALPHA_DEFAULT))
+        theme.set_glass_alpha(saved_alpha)
 
         # Work Hours / Show Weekends (Settings tab) -- same "load once at
         # startup, mutate the config module's globals" pattern theme.py's
@@ -86,6 +91,17 @@ class MainWindow(tk.Tk):
         # Sidebar instances (Timesheet and Template tabs -- see
         # _build_body) so they always collapse together.
         self.sidebar_collapsed = (self.db.get_setting("sidebar_collapsed", "0") or "0") == "1"
+        try:
+            self.sidebar_width = int(
+                self.db.get_setting("sidebar_width", str(config.DEFAULT_SIDEBAR_WIDTH_PX))
+                or config.DEFAULT_SIDEBAR_WIDTH_PX)
+        except (TypeError, ValueError):
+            self.sidebar_width = config.DEFAULT_SIDEBAR_WIDTH_PX
+        self.sidebar_width = max(
+            config.MIN_SIDEBAR_WIDTH_PX,
+            min(config.MAX_SIDEBAR_WIDTH_PX, self.sidebar_width))
+        self._sidebar_bodies = []
+        self._sash_dragging = False
 
         self.family = theme.apply_theme(self)
         self.configure(bg=theme.APP_BG)
@@ -229,7 +245,7 @@ class MainWindow(tk.Tk):
         way for the app to fail to start."""
         try:
             # Forces Tk to actually process the geometry() call from
-            # _maximize_on_start() before asking winfo_width/height for
+            # _center_on_start() before asking winfo_width/height for
             # it below -- without this, they'd still report Tk's
             # not-yet-realized placeholder size (1x1) rather than what
             # was actually requested.
@@ -252,42 +268,16 @@ class MainWindow(tk.Tk):
         except Exception:
             pass  # a diagnostic must never itself become a startup failure
 
-    def _maximize_on_start(self):
-        """Start filling the screen rather than the fixed 1240x780
-        self.geometry() above (kept as the fallback size if every
-        approach here fails, e.g. some unusual window manager) -- Tk
-        doesn't have one call that reliably does this everywhere, so each
-        platform gets its own best option:
-
-        Windows and most Linux window managers support a real "zoomed"
-        window state (self.state("zoomed")) or, failing that, the
-        "-zoomed" attribute some X11 window managers use instead.
-
-        macOS is deliberately handled differently, not just as the last
-        resort below: the Tk/Aqua build macOS still bundles system-wide
-        has a long history of quirks (see _nudge_to_force_repaint's own
-        note on the same build's blank-window-on-launch bug), and
-        "zoomed" isn't reliably one of the states it honors. Sizing the
-        window to the screen's own dimensions gets the same practical
-        result without depending on that support."""
-        if sys.platform == "darwin":
-            try:
-                self.geometry(f"{self.winfo_screenwidth()}x{self.winfo_screenheight()}+0+0")
-            except tk.TclError:
-                pass
-            return
+    def _center_on_start(self):
+        """Open at the designed size, centered — not fullscreen."""
         try:
-            self.state("zoomed")
-            return
-        except tk.TclError:
-            pass
-        try:
-            self.attributes("-zoomed", True)
-            return
-        except tk.TclError:
-            pass
-        try:
-            self.geometry(f"{self.winfo_screenwidth()}x{self.winfo_screenheight()}+0+0")
+            self.update_idletasks()
+            w, h = 1240, 780
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            x = max(40, (sw - w) // 2)
+            y = max(40, (sh - h) // 2)
+            self.geometry(f"{w}x{h}+{x}+{y}")
         except tk.TclError:
             pass
 
@@ -295,6 +285,8 @@ class MainWindow(tk.Tk):
         menubar = tk.Menu(self)
 
         file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Sync QDMs from Jira…", command=self._sync_qdms_from_jira)
+        file_menu.add_command(label="Push hours to Jira…", command=self._open_export_dialog)
         file_menu.add_command(label="Export to Jira CSV…", command=self._open_export_dialog)
         file_menu.add_separator()
         file_menu.add_command(label="Backup & Restore…", command=self._open_backup_dialog)
@@ -303,7 +295,7 @@ class MainWindow(tk.Tk):
         menubar.add_cascade(label="File", menu=file_menu)
 
         settings_menu = tk.Menu(menubar, tearoff=0)
-        settings_menu.add_command(label="Jira Export Settings…", command=self._open_settings_dialog)
+        settings_menu.add_command(label="Jira & Settings…", command=self._open_settings_dialog)
         menubar.add_cascade(label="Settings", menu=settings_menu)
 
         # The old binary "Dark Mode" checkbutton lived here; it's been
@@ -336,10 +328,14 @@ class MainWindow(tk.Tk):
 
     def _build_header(self):
         # "Hidden" removes the header row (and its separator) entirely --
-        # the Export to Jira CSV button that used to live here now always
-        # lives in the tab row instead (see _build_body), so nothing here
-        # is load-bearing for reaching Export once the heading is hidden.
+        # the Export CSV / Push to Jira buttons that used to live here now
+        # always live in the tab row instead (see _build_body), so nothing
+        # here is load-bearing for reaching those once the heading is hidden.
+        # On macOS a themed full-size titlebar still needs a strip of
+        # window color behind the traffic lights.
         if self.header_style == "hidden":
+            if getattr(self, "_themed_titlebar", False):
+                tk.Frame(self, bg=theme.APP_BG, height=theme.MAC_TITLEBAR_PX).pack(fill="x")
             return
 
         profile = self._HEADER_PROFILES.get(self.header_style, self._HEADER_PROFILES["standard"])
@@ -347,8 +343,9 @@ class MainWindow(tk.Tk):
         header = tk.Frame(self, bg=theme.PANEL_BG)
         header.pack(fill="x")
 
+        pad_l = (theme.themed_titlebar_left_pad() if getattr(self, "_themed_titlebar", False) else 20)
         inner = tk.Frame(header, bg=theme.PANEL_BG)
-        inner.pack(fill="x", padx=20, pady=profile["pady"])
+        inner.pack(fill="x", padx=(pad_l, 20), pady=profile["pady"])
 
         title_row = tk.Frame(inner, bg=theme.PANEL_BG)
         title_row.pack(side="left")
@@ -360,6 +357,9 @@ class MainWindow(tk.Tk):
         title_box.pack(side="left")
         tk.Label(title_box, text="QUASAR Timesheet Manager", font=(self.family, profile["title_pt"], "bold"),
                  bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY).pack(anchor="w")
+        if self.header_style == "standard":
+            tk.Label(title_box, text="Track time · sync QDMs · log hours to Jira",
+                     font=(self.family, 9), bg=theme.PANEL_BG, fg=theme.TEXT_MUTED).pack(anchor="w")
 
         sep = tk.Frame(self, bg=theme.BORDER, height=1)
         sep.pack(fill="x")
@@ -405,57 +405,129 @@ class MainWindow(tk.Tk):
         Template tabs' -- see _build_body). Persists, then reuses the
         same full destroy-and-rebuild _select_theme already triggers for
         a theme/work-hours change: the sidebar's width is set via the
-        grid column it lives in (see _make_sidebar_track_width), which is
+        grid column it lives in (see _place_sidebar_and_calendar), which is
         owned by MainWindow, not by Sidebar itself, so there's no
         cheaper way to resize it in place."""
         self.sidebar_collapsed = not self.sidebar_collapsed
         self.db.set_setting("sidebar_collapsed", "1" if self.sidebar_collapsed else "0")
         self._apply_theme_and_rebuild(theme.get_theme_id())
 
-    def _make_sidebar_track_width(self, body):
-        """Size column 0 (the sidebar) by hand on every resize of `body`,
-        instead of leaving it to Tk's grid weight-based surplus
-        distribution alone.
+    def _place_sidebar_and_calendar(self, body, sidebar, calendar):
+        """Sidebar | draggable sash | calendar.
 
-        CalendarGrid deliberately grows its own day columns to fill
-        whatever width its column is given (see
-        CalendarGrid._on_canvas_resize) -- that's the intended behavior,
-        so the calendar soaks up most of a wider window. But it also means
-        the calendar's *own* natural reqwidth grows right along with it
-        (its internal day-total Frames get their width explicitly
-        reconfigured to match), so by the time Tk lays the grid back out,
-        the calendar's demand has already inflated to claim almost all of
-        the available space. That leaves Tk's weight-based split with
-        essentially no real surplus left to hand the sidebar its
-        proportional share, and the sidebar stays pinned at its bare
-        minsize even on a much wider window.
-
-        The fix is to stop relying on that feedback loop and set the
-        sidebar's minsize directly, as a fixed proportion of `body`'s own
-        available width (matching the 1:4 weight split configured above),
-        floored at MIN_SIDEBAR_WIDTH_PX. Column 0's weight is zeroed out
-        once this takes over, so 100% of whatever's left still flows to
-        the calendar column exactly as before.
+        Width is a stored pixel size, not a fraction of the window: long
+        QDM names need the list to grow horizontally without waiting for
+        the whole window to grow, and growing the window should give that
+        extra space to the calendar instead of stretching names you
+        already chose a width for.
         """
-        col0 = body.grid_columnconfigure(0)
-        col1 = body.grid_columnconfigure(1)
-        w0 = col0["weight"] or 1
-        w1 = col1["weight"] or 1
-        ratio = w0 / (w0 + w1)
+        width = (config.SIDEBAR_COLLAPSED_WIDTH_PX if self.sidebar_collapsed
+                 else self.sidebar_width)
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, minsize=width, weight=0)
+        body.grid_columnconfigure(1, minsize=8, weight=0)
+        body.grid_columnconfigure(2, weight=1)
 
-        def on_resize(event):
-            if event.widget is not body:
-                return
-            # Collapsed: a fixed narrow rail, not a proportional share of
-            # the window -- it doesn't grow with the window the way the
-            # expanded sidebar does.
+        sidebar.grid(row=0, column=0, sticky="nsew")
+        # Hit target only — same fill as the panes so it isn't a visible
+        # gutter between QDMs and the calendar.
+        sash = tk.Frame(body, width=8, bg=theme.APP_BG, highlightthickness=0, bd=0,
+                        cursor="" if self.sidebar_collapsed else "sb_h_double_arrow")
+        sash.grid(row=0, column=1, sticky="ns")
+        sash.grid_propagate(False)
+        calendar.grid(row=0, column=2, sticky="nsew")
+        self._sidebar_bodies.append(body)
+        self._bind_sidebar_sash(sash, body, sidebar, calendar)
+
+    def _apply_sidebar_column_width(self, body=None, sidebar=None):
+        width = (config.SIDEBAR_COLLAPSED_WIDTH_PX if self.sidebar_collapsed
+                 else self.sidebar_width)
+        bodies = [body] if body is not None else self._sidebar_bodies
+        for b in bodies:
+            try:
+                b.grid_columnconfigure(0, minsize=width, weight=0)
+            except tk.TclError:
+                pass
+        if self.sidebar_collapsed:
+            return
+        sidebars = [sidebar] if sidebar is not None else (
+            getattr(self, "sidebar", None), getattr(self, "template_sidebar", None))
+        for sb in sidebars:
+            if sb is not None:
+                sb.set_content_width(self.sidebar_width)
+
+    def _bind_sidebar_sash(self, sash, body, sidebar, calendar):
+        state = {"origin": 0, "start": 0, "active": False}
+
+        def start(event):
             if self.sidebar_collapsed:
-                sidebar_w = config.SIDEBAR_COLLAPSED_WIDTH_PX
-            else:
-                sidebar_w = max(config.MIN_SIDEBAR_WIDTH_PX, int(event.width * ratio))
-            body.grid_columnconfigure(0, minsize=sidebar_w, weight=0)
+                return
+            state["origin"] = event.x_root
+            state["start"] = self.sidebar_width
+            state["active"] = True
+            self._sash_dragging = True
+            calendar.set_relayout_deferred(True)
+            try:
+                sash.grab_set()
+            except tk.TclError:
+                pass
+            sash.configure(bg=theme.ACCENT_SOFT)
+            # Pointer routinely leaves the 6px sash mid-drag; grab plus a
+            # window-level bind keep motion events coming so names track
+            # the mouse instead of stalling until release.
+            state["motion"] = self.bind("<B1-Motion>", drag)
+            state["release"] = self.bind("<ButtonRelease-1>", end)
 
-        body.bind("<Configure>", on_resize, add="+")
+        def drag(event):
+            if self.sidebar_collapsed or not state["active"]:
+                return
+            window_cap = max(config.MIN_SIDEBAR_WIDTH_PX, int(self.winfo_width() * 0.55))
+            max_w = min(config.MAX_SIDEBAR_WIDTH_PX, window_cap)
+            new_w = state["start"] + (event.x_root - state["origin"])
+            new_w = max(config.MIN_SIDEBAR_WIDTH_PX, min(max_w, new_w))
+            if new_w == self.sidebar_width:
+                return
+            self.sidebar_width = new_w
+            # Only the pane being dragged — the other tab's calendar stays
+            # put until mouse-up. wraplength updates in place; nothing is
+            # destroyed, so names track the sash without a black flash.
+            self._apply_sidebar_column_width(body=body, sidebar=sidebar)
+            body.update_idletasks()
+
+        def end(_event=None):
+            if not state["active"]:
+                return
+            state["active"] = False
+            self._sash_dragging = False
+            try:
+                sash.grab_release()
+            except tk.TclError:
+                pass
+            for key, seq in (("motion", "<B1-Motion>"), ("release", "<ButtonRelease-1>")):
+                funcid = state.pop(key, None)
+                if funcid:
+                    try:
+                        self.unbind(seq, funcid)
+                    except tk.TclError:
+                        pass
+            sash.configure(bg=theme.APP_BG)
+            self._apply_sidebar_column_width()
+            calendar.set_relayout_deferred(False)
+            self.db.set_setting("sidebar_width", str(int(self.sidebar_width)))
+
+        def hover_in(_event):
+            if not self.sidebar_collapsed:
+                sash.configure(bg=theme.ACCENT_SOFT)
+
+        def hover_out(_event):
+            if not state["active"]:
+                sash.configure(bg=theme.APP_BG)
+
+        sash.bind("<ButtonPress-1>", start)
+        sash.bind("<B1-Motion>", drag)
+        sash.bind("<ButtonRelease-1>", end)
+        sash.bind("<Enter>", hover_in)
+        sash.bind("<Leave>", hover_out)
 
     def _build_body(self, initial_week_start=None):
         # A Notebook (tabs at the top) rather than a bare frame: every
@@ -482,15 +554,15 @@ class MainWindow(tk.Tk):
         # and calls .select() on click, refreshed by _refresh_tab_bar()
         # (called from _on_tab_changed, so it stays in sync with every
         # notebook.select()/tab(state=...) call anywhere in this file).
-        # tab_row holds the hand-drawn tab strip on the left and Export to
-        # Jira CSV on the right -- Export used to live in the header (see
-        # _build_header), but now always sits here instead, regardless of
-        # which Heading size is chosen (including "hidden", which has no
-        # header row left to hold it at all). self.tab_bar itself holds
-        # only the tab buttons: _refresh_tab_bar() below destroys and
-        # rebuilds *its* children on every tab change, so Export lives in
-        # this separate sibling frame instead of inside tab_bar, where
-        # that rebuild would otherwise destroy it too.
+        # tab_row holds the hand-drawn tab strip on the left and Export
+        # CSV / Push to Jira on the right -- those used to live in the
+        # header (see _build_header), but now always sit here instead,
+        # regardless of which Heading size is chosen (including "hidden",
+        # which has no header row left to hold them at all). self.tab_bar
+        # itself holds only the tab buttons: _refresh_tab_bar() below
+        # destroys and rebuilds *its* children on every tab change, so
+        # the CTAs live in this separate sibling frame instead of inside
+        # tab_bar, where that rebuild would otherwise destroy them too.
         tab_row = tk.Frame(self, bg=theme.APP_BG)
         # Equal gap above and below -- it used to be flush against the
         # separator under the Timer bar (pady top=0) while still getting
@@ -498,8 +570,12 @@ class MainWindow(tk.Tk):
         # crowded against the Timer section and lopsided against the card.
         tab_row.pack(fill="x", padx=16, pady=(10, 10))
 
-        RoundedButton(tab_row, text="Export to Jira CSV", style="Accent.TButton",
+        # pack() side=right stacks inward, so Push is packed first to stay
+        # on the far right, with Export CSV immediately to its left.
+        RoundedButton(tab_row, text="Push to Jira", style="Accent.TButton",
                       command=self._open_export_dialog).pack(side="right")
+        RoundedButton(tab_row, text="Export CSV", style="Secondary.TButton",
+                      command=self._open_export_dialog).pack(side="right", padx=(0, 8))
 
         self.tab_bar = tk.Frame(tab_row, bg=theme.APP_BG)
         self.tab_bar.pack(side="left", fill="x", expand=True)
@@ -519,32 +595,15 @@ class MainWindow(tk.Tk):
         # itself, since the calendar is nested a level deeper alongside the
         # sidebar.
         self.timesheet_tab = body
-
-        # Grid (rather than pack) so the sidebar column can stretch along
-        # with the window instead of staying pinned at a fixed pixel width
-        # -- it just gets a much smaller share of any extra space than the
-        # calendar does, and never shrinks below MIN_SIDEBAR_WIDTH_PX.
-        body.grid_rowconfigure(0, weight=1)
-        body.grid_columnconfigure(
-            0, weight=1,
-            minsize=config.SIDEBAR_COLLAPSED_WIDTH_PX if self.sidebar_collapsed else config.MIN_SIDEBAR_WIDTH_PX)
-        body.grid_columnconfigure(1, weight=4)
-        self._make_sidebar_track_width(body)
+        self._sidebar_bodies = []
 
         self.sidebar = Sidebar(body, self.db, on_change=self._on_sidebar_change,
                                 open_activity_panel=self._open_activity_panel,
                                 open_project_panel=self._open_project_panel,
                                 collapsed=self.sidebar_collapsed,
-                                on_toggle_collapse=self._toggle_sidebar_collapsed)
-        # The 14px gap between sidebar and calendar is taken out of the
-        # calendar's side (padx on the calendar below), not the sidebar's:
-        # the sidebar's ScrollArea draws its rounded card via place(), which
-        # -- unlike pack -- doesn't hint the column's width negotiation with
-        # its content's natural size, so any padx carved out of the
-        # sidebar's own cell comes straight off its configured minimum
-        # width. The calendar has plenty of slack to spare instead.
-        self.sidebar.grid(row=0, column=0, sticky="nsew")
-
+                                on_toggle_collapse=self._toggle_sidebar_collapsed,
+                                on_jira_sync=self._sync_qdms_from_jira,
+                                content_width=self.sidebar_width)
         self.calendar = CalendarGrid(
             body, self.db,
             get_armed_activity=lambda: self.sidebar.get_armed_activity(),
@@ -553,7 +612,8 @@ class MainWindow(tk.Tk):
             open_duplicate=self._open_duplicate_panel,
             initial_week_start=initial_week_start,
         )
-        self.calendar.grid(row=0, column=1, sticky="nsew", padx=(14, 0))
+        self._place_sidebar_and_calendar(body, self.sidebar, self.calendar)
+        self.sidebar.set_calendar(self.calendar)
 
         # Permanent "Template" tab -- built the same way as "Timesheet"
         # above, but backed by TemplateEntry rows (template_mode=True) with
@@ -566,20 +626,13 @@ class MainWindow(tk.Tk):
         self._all_tabs.append((template_body, "Template"))
         self.template_tab = template_body
 
-        template_body.grid_rowconfigure(0, weight=1)
-        template_body.grid_columnconfigure(
-            0, weight=1,
-            minsize=config.SIDEBAR_COLLAPSED_WIDTH_PX if self.sidebar_collapsed else config.MIN_SIDEBAR_WIDTH_PX)
-        template_body.grid_columnconfigure(1, weight=4)
-        self._make_sidebar_track_width(template_body)
-
         self.template_sidebar = Sidebar(template_body, self.db, on_change=self._on_sidebar_change,
                                          open_activity_panel=self._open_activity_panel,
                                          open_project_panel=self._open_project_panel,
                                          collapsed=self.sidebar_collapsed,
-                                         on_toggle_collapse=self._toggle_sidebar_collapsed)
-        self.template_sidebar.grid(row=0, column=0, sticky="nsew")
-
+                                         on_toggle_collapse=self._toggle_sidebar_collapsed,
+                                         on_jira_sync=self._sync_qdms_from_jira,
+                                         content_width=self.sidebar_width)
         self.template_calendar = CalendarGrid(
             template_body, self.db,
             get_armed_activity=lambda: self.template_sidebar.get_armed_activity(),
@@ -588,7 +641,8 @@ class MainWindow(tk.Tk):
             open_duplicate=self._open_duplicate_panel,
             template_mode=True,
         )
-        self.template_calendar.grid(row=0, column=1, sticky="nsew", padx=(14, 0))
+        self._place_sidebar_and_calendar(template_body, self.template_sidebar, self.template_calendar)
+        self.template_sidebar.set_calendar(self.template_calendar)
 
         # Permanent "Summary" tab -- like Template, added directly via
         # self.notebook.add (not self._register_panel) so it's never
@@ -718,7 +772,13 @@ class MainWindow(tk.Tk):
         anything to those keys today, a text field silently swallowing
         undo/redo instead of the calendar acting on it would be a worse
         surprise than this shortcut occasionally doing nothing)."""
-        return isinstance(widget, (tk.Entry, tk.Text, ttk.Entry, ttk.Combobox, ttk.Spinbox))
+        w = widget
+        while w is not None:
+            if isinstance(w, (tk.Entry, tk.Text, ttk.Entry, ttk.Combobox, ttk.Spinbox,
+                              RoundedCombobox)):
+                return True
+            w = getattr(w, "master", None)
+        return False
 
     def _on_undo_shortcut(self, event=None):
         if self._is_typing_target(self.focus_get()):
@@ -897,13 +957,14 @@ class MainWindow(tk.Tk):
 
         def on_save(new_display_name, new_theme_id,
                     new_work_start_hour, new_work_end_hour, new_show_weekends,
-                    new_show_timer_bar, new_header_style):
+                    new_show_timer_bar, new_header_style, jira_fields=None):
             self.db.set_setting("jira_display_name", new_display_name)
             self.db.set_setting("work_start_hour", str(new_work_start_hour))
             self.db.set_setting("work_end_hour", str(new_work_end_hour))
             self.db.set_setting("show_weekends", "1" if new_show_weekends else "0")
             self.db.set_setting("show_timer_bar", "1" if new_show_timer_bar else "0")
             self.db.set_setting("header_style", new_header_style)
+            self._persist_jira_fields(jira_fields or {})
 
             # Always persist the Custom palette's current seed colors,
             # whether or not "custom" is the theme actually being saved --
@@ -916,6 +977,7 @@ class MainWindow(tk.Tk):
             self.db.set_setting("custom_theme_panel_bg", custom_seeds["panel_bg"])
             self.db.set_setting("custom_theme_text", custom_seeds["text_primary"])
             self.db.set_setting("custom_theme_accent", custom_seeds["accent"])
+            self.db.set_setting("glass_alpha", f"{theme.get_glass_alpha():.2f}")
 
             hours_changed = (new_work_start_hour != current_work_start_hour
                               or new_work_end_hour != current_work_end_hour
@@ -947,10 +1009,20 @@ class MainWindow(tk.Tk):
             # from the very Settings tab the rebuild is about to destroy.
             if new_theme_id != current_theme_id or hours_changed or chrome_changed:
                 self.after(0, lambda: self._select_theme(new_theme_id))
+            else:
+                theme.apply_window_opacity(self)
 
-        self.settings_panel.load(display_name, current_theme_id, current_work_start_hour,
-                                  current_work_end_hour, current_show_weekends,
-                                  current_show_timer_bar, current_header_style, on_save)
+        self.settings_panel.load(
+            display_name, current_theme_id, current_work_start_hour,
+            current_work_end_hour, current_show_weekends,
+            current_show_timer_bar, current_header_style, on_save,
+            jira_site_url=self.db.get_setting("jira_site_url", "") or "",
+            jira_email=self.db.get_setting("jira_email", "") or "",
+            jira_api_token=self.db.get_setting("jira_api_token", "") or "",
+            jira_project_key=self.db.get_setting("jira_project_key", "QDM") or "QDM",
+            on_test_jira=self._test_jira_connection,
+            on_sync_jira=self._sync_qdms_from_jira_fields,
+        )
 
     def _open_settings_dialog(self):
         # Settings is a permanent tab now (see _build_body) -- this just
@@ -1002,8 +1074,247 @@ class MainWindow(tk.Tk):
         def on_export(start_date, end_date):
             self._do_export(start_date, end_date)
 
-        self.export_panel.load(self.calendar.week_start, on_export)
+        def on_push(start_date, end_date):
+            self._push_hours_to_jira(start_date, end_date)
+
+        self.export_panel.load(self.calendar.week_start, on_export, on_push=on_push)
         self._show_panel(self.export_panel)
+
+    def _persist_jira_fields(self, fields: dict):
+        if not fields:
+            return
+        if "site_url" in fields:
+            self.db.set_setting(
+                "jira_site_url",
+                jira_client.normalize_site_url(fields.get("site_url") or ""),
+            )
+        if "email" in fields:
+            self.db.set_setting("jira_email", fields.get("email") or "")
+        if "api_token" in fields and (fields.get("api_token") or "").strip():
+            self.db.set_setting("jira_api_token", fields["api_token"].strip())
+        if "project_key" in fields:
+            self.db.set_setting("jira_project_key", (fields.get("project_key") or "QDM").strip() or "QDM")
+
+    def _jira_creds(self, fields: Optional[dict] = None) -> jira_client.JiraCredentials:
+        if fields:
+            self._persist_jira_fields(fields)
+        return jira_client.credentials_from_settings(self.db.get_setting)
+
+    def _jira_alert(self, title: str, message: str, kind: str = "warning"):
+        show = messagebox.showwarning if kind == "warning" else messagebox.showinfo
+        show(title, message, parent=self)
+
+    def _set_jira_busy(self, busy: bool, status: str = ""):
+        try:
+            self.config(cursor="watch" if busy else "")
+        except tk.TclError:
+            pass
+        if hasattr(self, "settings_panel"):
+            try:
+                if status:
+                    self.settings_panel.jira_status_label.config(text=status)
+                elif not busy:
+                    pass
+            except tk.TclError:
+                pass
+
+    def _test_jira_connection(self, fields: dict):
+        creds = self._jira_creds(fields)
+        if not creds.is_complete():
+            self._jira_alert(
+                "Jira",
+                "Need a site URL and API token first.\n\n"
+                "Create a token at https://id.atlassian.com/manage-profile/security/api-tokens "
+                "and paste it in Settings, or set QUASAR_JIRA_TOKEN.")
+            return
+
+        self._set_jira_busy(True, "Testing connection…")
+
+        def worker():
+            try:
+                name = jira_client.test_connection(creds)
+            except Exception as exc:
+                err = str(exc)
+                jira_client._log(f"test_connection failed: {type(exc).__name__}: {exc}")
+                self.after(0, lambda err=err: self._jira_job_failed("Jira", err))
+                return
+            self.after(0, lambda: self._jira_test_ok(name))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _jira_test_ok(self, name: str):
+        self._set_jira_busy(False, f"Connected as {name}.")
+        self._jira_alert(
+            "Jira",
+            f"Connected as {name}. Sync QDMs only reads your assigned issues — "
+            "it does not change anything in Jira.",
+            kind="info")
+
+    def _jira_job_failed(self, title: str, err: str):
+        self._set_jira_busy(False, err)
+        self._jira_alert(title, err)
+
+    def _sync_qdms_from_jira(self):
+        self._sync_qdms_from_jira_fields(None)
+
+    def _sync_qdms_from_jira_fields(self, fields: Optional[dict]):
+        creds = self._jira_creds(fields)
+        if not creds.is_complete():
+            self._jira_alert(
+                "Sync QDMs",
+                "Add your Jira site URL and API token in Settings first "
+                "(or set QUASAR_JIRA_URL / QUASAR_JIRA_TOKEN), then try again.")
+            self._open_settings_dialog()
+            return
+
+        self._set_jira_busy(True, "Fetching your assigned QDMs from Jira…")
+
+        def worker():
+            # HTTP only on this thread. SQLite must stay on the Tk main
+            # thread — using self.db here used to raise ProgrammingError
+            # and die silently, which looked like "Sync does nothing".
+            try:
+                fetched = jira_client.fetch_issues(creds)
+            except Exception as exc:
+                err = str(exc)
+                jira_client._log(
+                    f"fetch_issues failed: {type(exc).__name__}: {exc}\n"
+                    f"{traceback.format_exc()}")
+                self.after(0, lambda err=err: self._jira_job_failed("Sync QDMs", err))
+                return
+            self.after(0, lambda: self._apply_jira_sync(fetched))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_jira_sync(self, fetched):
+        try:
+            issues = fetched.issues if isinstance(fetched, jira_client.FetchResult) else fetched
+            open_capped = bool(getattr(fetched, "open_capped", False))
+            closed_capped = bool(getattr(fetched, "closed_capped", False))
+            result = jira_sync.sync_issues_into_db(
+                self.db, issues,
+                archive_open_missing=not open_capped,
+                archive_closed_missing=not closed_capped,
+                open_capped=open_capped,
+                closed_capped=closed_capped,
+            )
+            self._on_jira_sync_done(result)
+        except Exception as exc:
+            jira_client._log(f"sync_issues_into_db failed: {exc}\n{traceback.format_exc()}")
+            self._jira_job_failed("Sync QDMs", str(exc))
+
+    def _on_jira_sync_done(self, result: jira_sync.SyncResult):
+        self._on_sidebar_change()
+        self._set_jira_busy(False, f"Fetched {result.fetched} assigned QDM(s).")
+        if result.fetched == 0:
+            self._jira_alert(
+                "Sync QDMs",
+                "Jira returned no open issues assigned to this account.\n\n"
+                "Nothing was changed in Jira — this is only a read.\n\n"
+                "If you expected a list, check the Project key (QDM) and that "
+                "the token belongs to the same Atlassian account those tickets "
+                "are assigned to.",
+                kind="info")
+            return
+        cap_note = ""
+        if result.open_capped or result.closed_capped:
+            bits = []
+            if result.open_capped:
+                bits.append(f"{jira_client._MAX_OPEN_ISSUES} open")
+            if result.closed_capped:
+                bits.append(f"{jira_client._MAX_CLOSED_ISSUES} closed")
+            cap_note = (
+                f"\n\nStopped at {' / '.join(bits)} so the sidebar stays usable "
+                "(newest assigned first). Older assigned tickets may not appear."
+            )
+        self._jira_alert(
+            "Sync QDMs",
+            f"Fetched {result.fetched} issue(s) assigned to you.\n"
+            f"Added {result.created} QDM(s) to the sidebar, updated {result.updated}, "
+            f"created {result.projects_created} project group(s).\n\n"
+            "Only QDMs with a ticket assigned to you are listed. "
+            "Nothing was written to Jira. Groups are collapsed — click a "
+            "triangle in the left sidebar to see that group's QDMs."
+            f"{cap_note}",
+            kind="info")
+
+    def _push_hours_to_jira(self, start_date: str, end_date: str):
+        creds = self._jira_creds()
+        if not creds.is_complete():
+            self._jira_alert(
+                "Push to Jira",
+                "Add your Jira site URL and API token in Settings first, then try again.")
+            self._open_settings_dialog()
+            return
+        entries = self.db.list_time_entries_between(start_date, end_date)
+        if not entries:
+            self._jira_alert("Push to Jira", "There are no time blocks in that date range.", kind="info")
+            return
+
+        ready = [e for e in entries if (e.jira_key or "").strip()]
+        skipped_n = len(entries) - len(ready)
+        if not ready:
+            self._jira_alert(
+                "Push to Jira",
+                "None of those time blocks have a Jira Issue Key, so nothing "
+                "would be logged.\n\nCSV export uses the same rule — assign a "
+                "QDM (issue key) on each block first.",
+                kind="info")
+            return
+
+        will_update = sum(1 for e in ready if e.jira_worklog_id)
+        will_create = len(ready) - will_update
+        lines = [
+            f"Log hours to Jira for {start_date} – {end_date}?",
+            "",
+            f"  • {will_create} new worklog(s) will be added",
+            f"  • {will_update} existing worklog(s) will be updated "
+            "(already pushed from this app — not duplicated)",
+        ]
+        if skipped_n:
+            lines.append(f"  • {skipped_n} block(s) skipped (no Jira Issue Key)")
+        lines += [
+            "",
+            "This only writes worklogs on those QDMs (started time, duration, "
+            "and the block’s notes as the comment).",
+            "It does not change ticket status, assignee, description, or anything else.",
+        ]
+        if not messagebox.askyesno("Push to Jira", "\n".join(lines), parent=self):
+            return
+
+        self._set_jira_busy(True, "Logging hours to Jira…")
+
+        def worker():
+            # Own connection: this thread can't use the window's sqlite conn.
+            db = Database(self.db.path)
+            try:
+                result = jira_sync.push_worklogs(db, creds, entries)
+            except Exception as exc:
+                err = str(exc)
+                jira_client._log(f"push_worklogs failed: {exc}\n{traceback.format_exc()}")
+                self.after(0, lambda err=err: self._jira_job_failed("Push to Jira", err))
+                return
+            finally:
+                db.close()
+            self.after(0, lambda: self._on_jira_push_done(result))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_jira_push_done(self, result: jira_sync.PushResult):
+        self._set_jira_busy(False)
+        self.calendar.refresh()
+        msg = (f"Logged {result.created} new worklog(s) to Jira"
+               f"{f', updated {result.updated}' if result.updated else ''}.")
+        if result.skipped:
+            msg += (f"\n\n{len(result.skipped)} block(s) skipped — no Jira Issue Key:\n" +
+                    "\n".join(f"  • {e.activity_name} ({e.date} {e.start_time}–{e.end_time})"
+                              for e in result.skipped[:8]))
+            if len(result.skipped) > 8:
+                msg += f"\n  …and {len(result.skipped) - 8} more."
+        if result.failed:
+            msg += "\n\nFailed:\n" + "\n".join(
+                f"  • {item.key}: {item.detail}" for item in result.failed[:8])
+        self._jira_alert("Push to Jira", msg, kind="info")
 
     def _do_export(self, start_date: str, end_date: str):
         entries = self.db.list_time_entries_between(start_date, end_date)
@@ -1065,8 +1376,10 @@ class MainWindow(tk.Tk):
             "which sets the color every one of its activities' time blocks "
             "shows -- click the arrow to collapse/expand, or right-click a "
             "project to edit/delete it.\n"
-            "• File → Export to Jira CSV… to generate a worklog CSV for Jira's "
-            "CSV importer. Only blocks with a Jira Issue Key are exported.\n\n"
+            "• File → Sync QDMs from Jira… pulls open issues into the sidebar "
+            "(needs a token in Settings). File → Push hours to Jira… logs "
+            "the week's blocks as worklogs on those issues — CSV export is "
+            "still there as a fallback.\n\n"
             "Keyboard shortcuts (click the calendar first so it has focus):\n"
             "• Click a block (without dragging) to select it -- it gets a "
             "highlighted outline.\n"

@@ -20,6 +20,7 @@ _day_options) are the only places that branch on template_mode -- every
 other method (drawing, dragging, hit-testing) works the same in both modes.
 """
 import tkinter as tk
+import tkinter.font as tkfont
 from datetime import date, datetime, timedelta
 from tkinter import messagebox
 from typing import Callable, Dict, List, Optional, Tuple, Union
@@ -60,6 +61,13 @@ def _minute_to_hhmm(minute_of_day: int) -> str:
 def _hhmm_to_minute(hhmm: str) -> int:
     h, m = (int(x) for x in hhmm.split(":"))
     return h * 60 + m - config.START_HOUR * 60
+
+
+def format_day_total_hours(minutes: float) -> str:
+    """Per-day total under the grid: `0h` when empty, else one decimal."""
+    if minutes <= 0:
+        return "0h"
+    return f"{minutes / 60:.1f}h"
 
 
 class CalendarGrid(tk.Frame):
@@ -117,6 +125,18 @@ class CalendarGrid(tk.Frame):
         # _zoom_out reuse this to recompute the grid without waiting for
         # an actual resize event.
         self._last_viewport_size = (0, 0)
+        # While the QDM sash is dragged, skip the full grid wipe-and-redraw
+        # that normally runs on every viewport <Configure>. One relayout
+        # on mouse-up is enough; doing it per pixel is what made the
+        # calendar flash black.
+        self._relayout_deferred = False
+        # Live window-resize coalescing -- a full refresh() per Configure
+        # pixel feels like the grid is stuttering. Apply the first layout
+        # immediately, then fold further events into one redraw.
+        self._resize_job: Optional[str] = None
+        self._pending_viewport: Optional[Tuple[int, int]] = None
+        self._hover_slot: Optional[Tuple[int, int]] = None
+        self._qdm_drop_binds: dict = {}
 
         # Which block (by id), if any, is currently keyboard-selected -- set
         # by clicking a block without dragging it, or by dragging one to a
@@ -146,44 +166,10 @@ class CalendarGrid(tk.Frame):
     # Layout / widgets
     # ------------------------------------------------------------------
     def _build_widgets(self):
-        inner = tk.Frame(self, bg=theme.PANEL_BG)
-        inner.pack(fill="both", expand=True, padx=16, pady=(16, 20))
-
-        # One single RoundedCard now holds the nav row (date range /
-        # Today / Apply Template), the calendar grid, AND the totals row
-        # together, so the whole thing reads as one cohesive rounded box
-        # -- nav on top, grid in the middle, totals on the bottom -- with
-        # nothing square-cornered floating outside it. This used to be
-        # three separate siblings of `inner` (nav / canvas_wrap+card /
-        # totals_frame), with only the grid itself rounded; that read as
-        # a rounded box sandwiched between two plain rows rather than one
-        # element.
-        #
-        # RoundedCard blends its own rounded corners into whatever color
-        # its immediate parent shows. GRID_BG is deliberately defined as
-        # an alias of PANEL_BG (see theme.py) so the grid, nav, and totals
-        # rows all match with no seam between them -- but that also means
-        # `inner` (also PANEL_BG) gives the card's corners nothing to
-        # contrast against. The same thin APP_BG wrapper used before (and
-        # by the Activities sidebar / Timer bar) fixes that.
-        # RoundedCard's default inset (max(6, radius // 2), ~7px at the
-        # radius every other card in the app uses) reads fine for a card
-        # whose rounded corners sit in the middle of a large area, but was
-        # too thin a margin here -- with nav/totals now living right up
-        # against the very top/bottom of this box, a 7px sliver of
-        # contrast color and a small radius left the curve too subtle to
-        # read as "this is one box" against real content (button labels,
-        # totals text) sitting right next to it. A wider explicit pad and
-        # a slightly larger radius give the corners real room to curve and
-        # make the APP_BG gutter around the whole shape unmistakable.
-        card_wrap = tk.Frame(inner, bg=theme.APP_BG)
-        card_wrap.pack(fill="both", expand=True)
-        card = RoundedCard(card_wrap, bg=theme.PANEL_BG, radius=18, pad=16)
-        card.pack(fill="both", expand=True)
-        body = card.body
-        # body's own 16px pad (set above) already provides the box's
-        # left/right/top/bottom margin, so nav/grid/totals need no padx of
-        # their own -- just the vertical gaps between the three rows.
+        card = RoundedCard(self, bg=theme.PANEL_BG, radius=CARD_RADIUS, outline=False)
+        card.pack(fill="both", expand=True, padx=(8, 12), pady=(8, 12))
+        inner = card.body
+        body = inner
 
         nav = tk.Frame(body, bg=theme.PANEL_BG)
         nav.pack(fill="x", pady=(0, 10))
@@ -197,13 +183,13 @@ class CalendarGrid(tk.Frame):
         self._hint_visible = True
 
         if not self.template_mode:
-            # shadow=True on these four only -- the ones the user pointed
-            # at as looking "a little bit strange" flat against the card.
-            RoundedButton(nav, text="‹", width=3, style="Nav.TButton", shadow=True,
+            # Compact circular ‹ › — idle fill matches the card so they
+            # read as glyphs, not as a square plate around a round button.
+            RoundedButton(nav, text="‹", width=3, style="Nav.TButton", compact=True,
                           command=self._prev_week).pack(side="left")
-            RoundedButton(nav, text="Today", style="Nav.TButton", shadow=True,
+            RoundedButton(nav, text="Today", style="Nav.TButton",
                           command=self._go_today).pack(side="left", padx=6)
-            RoundedButton(nav, text="›", width=3, style="Nav.TButton", shadow=True,
+            RoundedButton(nav, text="›", width=3, style="Nav.TButton", compact=True,
                           command=self._next_week).pack(side="left")
 
         self.week_label = tk.Label(nav, text="", font=(self.family, 12, "bold"),
@@ -216,11 +202,12 @@ class CalendarGrid(tk.Frame):
             # recurring week instead of re-creating the same meetings by
             # hand every time.
             self.apply_template_btn = RoundedButton(
-                nav, text="Apply Template to This Week", style="Nav.TButton", shadow=True,
+                nav, text="Apply Template to This Week", style="Nav.TButton",
                 command=self._apply_template)
             self.apply_template_btn.pack(side="left", padx=(4, 0))
 
-        self.hint_label = tk.Label(nav, text="", font=(self.family, 9), bd=0)
+        self.hint_label = tk.Label(nav, text="", font=(self.family, 9), bd=0,
+                                    bg=theme.PANEL_BG, fg=theme.TEXT_SECONDARY)
         self.hint_label.pack(side="right")
 
         # Manual zoom -- "-" / percentage / "+", packed right-to-left so
@@ -230,12 +217,12 @@ class CalendarGrid(tk.Frame):
         # Plain ASCII glyphs rather than a magnifying-glass icon, same
         # reasoning as theme.draw_logo_mark's own docstring: no font/
         # platform-availability guesswork.
-        RoundedButton(nav, text="+", width=3, style="Nav.TButton", shadow=True,
+        RoundedButton(nav, text="+", width=3, style="Nav.TButton", compact=True,
                       command=self._zoom_in).pack(side="right", padx=(6, 0))
         self.zoom_label = tk.Label(nav, text="100%", font=(self.family, 9, "bold"),
                                     bg=theme.PANEL_BG, fg=theme.TEXT_SECONDARY, width=4)
         self.zoom_label.pack(side="right")
-        RoundedButton(nav, text="−", width=3, style="Nav.TButton", shadow=True,
+        RoundedButton(nav, text="−", width=3, style="Nav.TButton", compact=True,
                       command=self._zoom_out).pack(side="right")
 
         # Below some width, "Apply Template to This Week" (and then the
@@ -254,9 +241,10 @@ class CalendarGrid(tk.Frame):
         # _on_canvas_resize() below, bound to _scroll_host's <Configure>
         # (the actual available viewport) rather than self.canvas's own --
         # see the long comment on _scroll_host just below for why.
-        # highlightthickness=0 -- the outer card now draws the one border
-        # for the whole nav+grid+totals box, so the grid itself needs none.
-        canvas_holder = tk.Frame(body, bg=theme.GRID_BG)
+        # highlightthickness=0 so Tk doesn't draw a square focus ring
+        # around the grid; the rounded card around this whole pane is the
+        # only outer shape.
+        canvas_holder = tk.Frame(body, bg=theme.PANEL_BG)
         canvas_holder.pack(fill="both", expand=True)
         canvas_holder.grid_rowconfigure(0, weight=1)
         canvas_holder.grid_columnconfigure(0, weight=1)
@@ -283,6 +271,9 @@ class CalendarGrid(tk.Frame):
         # _on_canvas_resize) shows/hides each one depending on whether the
         # grid's current content actually overflows the viewport, so a
         # roomy window shows no scrollbar chrome at all.
+        # Totals live in column 0 with the grid (not the full card width)
+        # so they share the scrollbar's leftover gap instead of sitting
+        # a few pixels right of each day.
 
         self.canvas = tk.Canvas(
             self._scroll_host, width=canvas_width, height=canvas_height + config.CANVAS_BOTTOM_PAD_PX,
@@ -309,49 +300,19 @@ class CalendarGrid(tk.Frame):
             widget.bind("<Button-4>", self._on_mousewheel)
             widget.bind("<Button-5>", self._on_mousewheel)
 
-        totals_holder = tk.Frame(body, bg=theme.PANEL_BG)
-        totals_holder.pack(fill="x", pady=(10, 0))
-        # A second small scrolling strip, kept horizontally in lockstep
-        # with _scroll_host above via _on_grid_xscroll -- so the per-day
-        # totals stay aligned with whichever day columns are currently
-        # scrolled into view, instead of a plain fixed row that would
-        # otherwise either overflow with no way to reach it, or drift out
-        # of sync with the grid, once the grid's content is wider than
-        # the window (see _scroll_host's own long comment above for why
-        # the grid itself scrolls this way rather than clipping).
-        self._totals_host = tk.Canvas(totals_holder, bg=theme.PANEL_BG, highlightthickness=0,
+        # Same column as _scroll_host (not packed under the scrollbar),
+        # same coordinate space as the grid (gutter + i * day_width),
+        # scrolled in lockstep via _on_grid_xscroll.
+        self._totals_host = tk.Canvas(canvas_holder, bg=theme.PANEL_BG, highlightthickness=0,
                                        height=config.TOTALS_ROW_HEIGHT_PX)
-        self._totals_host.pack(fill="x")
-
-        totals_frame = tk.Frame(self._totals_host, bg=theme.PANEL_BG)
-        self._totals_window = self._totals_host.create_window((0, 0), window=totals_frame, anchor="nw")
-        # Explicit height + pack_propagate(False): these frames need a fixed
-        # width to line up with the grid columns above, but pack_propagate
-        # off with no height set collapses them to almost nothing -- which
-        # was clipping the totals text ("8.5h" etc.) at the bottom of the
-        # calendar. Giving them a real height fixes that.
-        self.total_gutter_frame = tk.Frame(totals_frame, width=self.gutter_width,
-                                            height=config.TOTALS_ROW_HEIGHT_PX, bg=theme.PANEL_BG)
-        self.total_gutter_frame.pack(side="left")
-        self.total_gutter_frame.pack_propagate(False)
-        self.total_col_frames = []
-        self.total_labels = []
-        for _ in config.DAY_NAMES:
-            col = tk.Frame(totals_frame, width=self.day_width,
-                            height=config.TOTALS_ROW_HEIGHT_PX, bg=theme.PANEL_BG)
-            col.pack(side="left")
-            col.pack_propagate(False)
-            lbl = tk.Label(col, text="0.0h", font=(self.family, 9, "bold"),
-                            bg=theme.PANEL_BG, fg=theme.TEXT_SECONDARY)
-            lbl.pack()
-            self.total_col_frames.append(col)
-            self.total_labels.append(lbl)
+        self._totals_host.grid(row=2, column=0, sticky="ew", pady=(10, 0))
 
         self.canvas.bind("<Button-1>", self._on_button1)
         self.canvas.bind("<Double-Button-1>", self._on_double_click)
         self.canvas.bind("<B1-Motion>", self._on_motion_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
         self.canvas.bind("<Motion>", self._on_hover)
+        self.canvas.bind("<Leave>", lambda e: self._clear_hover_preview())
         self.canvas.bind("<Button-3>", self._on_right_click)
         self.canvas.bind("<Escape>", lambda e: self._cancel_drag())
         # Deliberately NOT self.canvas.bind("<Configure>", ...) here -- see
@@ -445,16 +406,63 @@ class CalendarGrid(tk.Frame):
             else:
                 self.hint_label.pack_forget()
 
+    def set_relayout_deferred(self, deferred: bool):
+        """Freeze (or thaw) shrink-to-fit redraws. Used by the sidebar
+        sash so dragging it doesn't wipe the grid on every mouse pixel."""
+        if deferred:
+            self._relayout_deferred = True
+            if self._resize_job is not None:
+                try:
+                    self.after_cancel(self._resize_job)
+                except tk.TclError:
+                    pass
+                self._resize_job = None
+            return
+        if not self._relayout_deferred:
+            return
+        self._relayout_deferred = False
+        try:
+            w = self._scroll_host.winfo_width()
+            h = self._scroll_host.winfo_height()
+        except (tk.TclError, AttributeError):
+            return
+        if w <= 1 or h <= 1:
+            return
+        self._pending_viewport = (w, h)
+        self._apply_pending_resize()
+
     def _on_canvas_resize(self, event):
         """Bound to _scroll_host's <Configure> (the real available
         viewport -- see the long comment where _scroll_host is built).
         Recompute day-column width/slot height to fit it, then hand off
         to _recompute_grid_dimensions for the rest."""
+        if self._relayout_deferred:
+            self._pending_viewport = (event.width, event.height)
+            return
         size = (event.width, event.height)
         if size == self._last_viewport_size:
             return
+        self._pending_viewport = size
+        # First layout has to paint immediately so the grid isn't empty
+        # for a frame. After that, coalesce Configure events so dragging
+        # the window doesn't wipe-and-redraw the canvas on every pixel.
+        if self._last_viewport_size == (0, 0):
+            self._apply_pending_resize()
+            return
+        if self._resize_job is not None:
+            try:
+                self.after_cancel(self._resize_job)
+            except tk.TclError:
+                pass
+        self._resize_job = self.after(32, self._apply_pending_resize)
+
+    def _apply_pending_resize(self):
+        self._resize_job = None
+        size = self._pending_viewport
+        if not size or size == self._last_viewport_size:
+            return
         self._last_viewport_size = size
-        self._recompute_grid_dimensions(event.width, event.height)
+        self._recompute_grid_dimensions(size[0], size[1])
 
     def _recompute_grid_dimensions(self, viewport_w, viewport_h):
         """The actual grid-sizing math: shrink-to-fit `viewport_w` x
@@ -497,9 +505,6 @@ class CalendarGrid(tk.Frame):
         self.slot_height = new_slot_height
         self.px_per_min = self.slot_height / config.SLOT_MINUTES
 
-        for col in getattr(self, "total_col_frames", []):
-            col.config(width=self.day_width)
-
         content_w = self.gutter_width + num_days * self.day_width
         content_h = self.header_height + num_slots * self.slot_height + config.CANVAS_BOTTOM_PAD_PX
         self.canvas.config(width=content_w, height=content_h)
@@ -507,11 +512,8 @@ class CalendarGrid(tk.Frame):
         self._scroll_host.config(scrollregion=(0, 0, content_w, content_h))
         self._update_scrollbars(viewport_w, viewport_h, content_w, content_h)
 
-        # Totals row: same content_w (it's the same day columns, just one
-        # short row), always its own fixed TOTALS_ROW_HEIGHT_PX -- it never
-        # scrolls vertically, only horizontally, and only ever in lockstep
-        # with the grid above (see _on_grid_xscroll).
-        self._totals_host.itemconfigure(self._totals_window, width=content_w)
+        # Totals row: same content_w and x origin as the grid, scrolled
+        # horizontally in lockstep (see _on_grid_xscroll).
         self._totals_host.config(scrollregion=(0, 0, content_w, config.TOTALS_ROW_HEIGHT_PX))
         self._totals_host.xview_moveto(self._scroll_host.xview()[0])
 
@@ -687,7 +689,8 @@ class CalendarGrid(tk.Frame):
         return entry.date
 
     def _make_entry(self, entry_id, activity_id, activity_name, jira_key, color, day_idx,
-                     start_time, end_time, notes, jira_project, issue_type) -> EntryLike:
+                     start_time, end_time, notes, jira_project, issue_type,
+                     jira_worklog_id=None) -> EntryLike:
         if self.template_mode:
             return TemplateEntry(
                 entry_id, activity_id, activity_name, jira_key, color, day_idx,
@@ -697,6 +700,7 @@ class CalendarGrid(tk.Frame):
             entry_id, activity_id, activity_name, jira_key, color,
             self.day_date(day_idx).isoformat(), start_time, end_time, notes,
             jira_project=jira_project, issue_type=issue_type,
+            jira_worklog_id=jira_worklog_id,
         )
 
     def _db_list_entries(self) -> List[EntryLike]:
@@ -757,6 +761,7 @@ class CalendarGrid(tk.Frame):
             "start_time": entry.start_time, "end_time": entry.end_time,
             "notes": entry.notes, "jira_project": entry.jira_project,
             "issue_type": entry.issue_type,
+            "jira_worklog_id": getattr(entry, "jira_worklog_id", None),
         }
 
     def _entry_from_fields(self, fields: dict) -> EntryLike:
@@ -764,6 +769,7 @@ class CalendarGrid(tk.Frame):
             None, fields["activity_id"], fields["activity_name"], fields["jira_key"],
             fields["color"], fields["day_idx"], fields["start_time"], fields["end_time"],
             fields["notes"], fields["jira_project"], fields["issue_type"],
+            jira_worklog_id=fields.get("jira_worklog_id"),
         )
 
     def _apply_fields_to_entry(self, entry: EntryLike, fields: dict):
@@ -782,6 +788,9 @@ class CalendarGrid(tk.Frame):
         entry.notes = fields["notes"]
         entry.jira_project = fields["jira_project"]
         entry.issue_type = fields["issue_type"]
+        if not self.template_mode:
+            assert isinstance(entry, TimeEntry)
+            entry.jira_worklog_id = fields.get("jira_worklog_id")
 
     def _push_undo(self, command: dict):
         self._undo_stack.append(command)
@@ -896,32 +905,35 @@ class CalendarGrid(tk.Frame):
         grid_top = self.header_height
         grid_bottom = grid_top + _minutes_total() * self.px_per_min
 
-        # Header background + day column backgrounds (tint today). Starts
-        # at gutter_width, not 0 -- HEADER_BG is a deliberately different
-        # shade from the grid's own GRID_BG/PANEL_BG background, and this
-        # rectangle used to span the full canvas width including the
-        # gutter column. The gutter has no day-header content of its own
-        # (hour labels start further down, at each hour's own gridline),
-        # so that left-most sliver of HEADER_BG just sat there as a
-        # visibly different-colored box with nothing in it -- butting
-        # right up against the first hour label ("9 AM"), which sits
-        # exactly on the header/grid boundary line, reading as if the box
-        # were cutting into it.
-        c.create_rectangle(self.gutter_width, 0, canvas_width, grid_top, fill=theme.HEADER_BG, outline="")
+        # Header background + day labels. Today's date used to sit on the
+        # bottom lip of a too-short chip (half on the blue, half on the
+        # header), so the chip is now a real two-line badge with padding
+        # around both the weekday and the date.
+        c.create_rectangle(self.gutter_width, 0, canvas_width, grid_top,
+                            fill=theme.HEADER_BG, outline="")
         today = date.today()
+        name_y = grid_top / 2 if self.template_mode else 20
+        date_y = 38
         for i, name in enumerate(config.DAY_NAMES):
             x0 = self.gutter_width + i * self.day_width
             x1 = x0 + self.day_width
             is_today = (not self.template_mode) and self.day_date(i) == today
             if is_today:
-                c.create_rectangle(x0, grid_top, x1, grid_bottom, fill=theme.TODAY_TINT, outline="")
+                c.create_rectangle(x0, grid_top, x1, grid_bottom,
+                                    fill=theme.TODAY_TINT, outline="", tags="today_col")
+                theme.place_rounded_rect(
+                    c, x0 + 6, 6, x1 - 6, grid_top - 6,
+                    radius=12, fill=theme.ACCENT_SOFT, outline="",
+                    background=theme.HEADER_BG,
+                )
             name_color = theme.ACCENT if is_today else theme.TEXT_PRIMARY
-            name_y = grid_top / 2 if self.template_mode else grid_top / 2 - 6
-            c.create_text((x0 + x1) / 2, name_y, text=name, font=(self.family, 9, "bold"),
+            c.create_text((x0 + x1) / 2, name_y, text=name, font=(self.family, 10, "bold"),
                            fill=name_color, justify="center")
             if not self.template_mode:
-                c.create_text((x0 + x1) / 2, grid_top / 2 + 10, text=self.day_date(i).strftime("%b %d"),
-                               font=(self.family, 8), fill=theme.TEXT_SECONDARY, justify="center")
+                date_color = theme.ACCENT if is_today else theme.TEXT_SECONDARY
+                c.create_text((x0 + x1) / 2, date_y, text=self.day_date(i).strftime("%b %d"),
+                               font=(self.family, 9, "bold" if is_today else "normal"),
+                               fill=date_color, justify="center")
 
         # Horizontal slot lines + hour labels
         minute = 0
@@ -952,9 +964,11 @@ class CalendarGrid(tk.Frame):
         # many side-by-side columns each day actually needs before drawing
         # anything.
         self.entries_by_id = {}
+        self._hover_slot = None
         entries = self._db_list_entries()
-        totals = [0] * 5
-        entries_by_day: List[List[EntryLike]] = [[] for _ in range(5)]
+        n_days = len(config.DAY_NAMES)
+        totals = [0] * n_days
+        entries_by_day: List[List[EntryLike]] = [[] for _ in range(n_days)]
         for e in entries:
             self.entries_by_id[e.id] = e
             day_idx = self._entry_day_idx(e)
@@ -976,13 +990,42 @@ class CalendarGrid(tk.Frame):
                 self._draw_entry(e, day_idx, col_idx, col_count,
                                   is_selected=(e.id == self.selected_entry_id))
 
-        for i, mins in enumerate(totals):
-            self.total_labels[i].config(text=f"{mins / 60:.1f}h")
+        self._draw_day_totals(totals, today)
 
         c.config(scrollregion=c.bbox("all"))
 
+    def _draw_day_totals(self, totals: List[int], today: date):
+        """Paint each day's hours at the same x as that day's grid column."""
+        c = self._totals_host
+        c.delete("total")
+        h = config.TOTALS_ROW_HEIGHT_PX
+        font = getattr(self, "_totals_font", None)
+        if font is None:
+            font = tkfont.Font(family=self.family, size=9, weight="bold")
+            self._totals_font = font
+        for i, mins in enumerate(totals):
+            x0 = self.gutter_width + i * self.day_width
+            cx = x0 + self.day_width / 2.0
+            is_today = (not self.template_mode) and self.day_date(i) == today
+            text = format_day_total_hours(mins)
+            if is_today:
+                pill_w = font.measure(text) + 24
+                pill_h = 22
+                theme.place_rounded_rect(
+                    c, cx - pill_w / 2, (h - pill_h) / 2,
+                    cx + pill_w / 2, (h + pill_h) / 2,
+                    radius=10, fill=theme.ACCENT_SOFT, outline="",
+                    background=theme.PANEL_BG, tags="total")
+            c.create_text(
+                cx, h / 2,
+                text=text,
+                font=font,
+                fill=theme.ACCENT if is_today else theme.TEXT_SECONDARY,
+                anchor="center",
+                tags="total")
+
     def _draw_now_line(self, today: date, grid_top: float):
-        for i in range(5):
+        for i in range(len(config.DAY_NAMES)):
             if self.day_date(i) != today:
                 continue
             now = datetime.now()
@@ -998,13 +1041,20 @@ class CalendarGrid(tk.Frame):
 
     def _update_hint(self):
         armed = self.get_armed_activity()
-        if armed:
+        dropping = self._drag_state and self._drag_state.get("mode") == "qdm-drop"
+        if dropping:
+            act = self._drag_state["activity"]
+            self.hint_label.config(
+                text=f"  Drop “{act.name}” — {config.QDM_DROP_MINUTES} min, drag to set duration  ",
+                bg=theme.ACCENT_SOFT, fg=theme.ACCENT,
+            )
+        elif armed:
             self.hint_label.config(
                 text=f"  Placing “{armed.name}” — click a slot (Esc to cancel)  ",
                 bg=theme.ACCENT_SOFT, fg=theme.ACCENT,
             )
         else:
-            self.hint_label.config(text="Drag on the grid to add a time block",
+            self.hint_label.config(text="Drag a QDM onto the grid, or drag a slot to add a block",
                                     bg=theme.PANEL_BG, fg=theme.TEXT_SECONDARY)
 
     def _layout_day_entries(self, day_entries: List[EntryLike]) -> Dict[int, Tuple[int, int]]:
@@ -1088,10 +1138,10 @@ class CalendarGrid(tk.Frame):
         """Pick which lines (name / notes / time) fit inside the block's
         pixel height, prioritizing notes over the time range so the user
         can tell activities apart at a glance."""
-        avail_w = max(10, x1 - x0 - 14)
+        avail_w = max(10, x1 - x0 - 18)
         avail_h = max(8, y1 - y0 - 8)
         chars_per_line = max(6, int(avail_w / 5.6))
-        line_pitch = 13
+        line_pitch = 14
         max_lines = max(1, int(avail_h // line_pitch))
 
         def truncate(s, n):
@@ -1131,17 +1181,24 @@ class CalendarGrid(tk.Frame):
         # high-contrast outline instead of the normal thin one -- the same
         # SELECTION_OUTLINE color every theme defines but nothing drew with
         # until this keyboard-selection feature existed.
-        outline_color = theme.SELECTION_OUTLINE if is_selected else theme.BLOCK_BORDER
-        outline_width = 3 if is_selected else 2
-        rect = theme.rounded_rect(
+        outline_color = theme.SELECTION_OUTLINE if is_selected else theme.darken(entry.color, 0.18)
+        outline_width = 3 if is_selected else 1
+        ids = theme.place_rounded_rect(
             self.canvas, x0, y0, x1, y1, radius=config.BLOCK_CORNER_RADIUS,
-            fill=entry.color, outline=outline_color, width=outline_width, tags=("entry", tag),
+            fill=entry.color, outline=outline_color, width=outline_width,
+            background=theme.GRID_BG, tags=("entry", tag),
+        )
+        rect = ids[-1]
+        stripe = theme.darken(entry.color, 0.22)
+        theme.place_rounded_rect(
+            self.canvas, x0, y0, min(x0 + 5, x1), y1, radius=min(4, config.BLOCK_CORNER_RADIUS),
+            fill=stripe, outline="", background=entry.color, tags=("entry", tag),
         )
         text_color = theme.block_text_color(entry.color)
         for text, is_bold, ty in self._entry_text_lines(entry, x0, y0, x1, y1):
             item = self.canvas.create_text(
-                x0 + 7, ty, text=text, anchor="nw",
-                font=(self.family, 8, "bold" if is_bold else "normal"),
+                x0 + 10, ty, text=text, anchor="nw",
+                font=(self.family, 9 if is_bold else 8, "bold" if is_bold else "normal"),
                 fill=text_color, tags=("entry_text", tag),
             )
             self.canvas.tag_raise(item, rect)
@@ -1378,9 +1435,11 @@ class CalendarGrid(tk.Frame):
 
     def _on_release(self, event):
         state = self._drag_state
-        self._drag_state = None
         if state is None:
             return
+        if state.get("mode") == "qdm-drop":
+            return
+        self._drag_state = None
 
         if state["mode"] == "create":
             self._finish_create(event, state)
@@ -1399,21 +1458,11 @@ class CalendarGrid(tk.Frame):
             armed = self.get_armed_activity()
             start_min = state["anchor_minute"]
             if armed:
-                duration = armed.default_duration_minutes or config.SLOT_MINUTES
+                duration = armed.default_duration_minutes or config.QDM_DROP_MINUTES
                 end_min = min(_minutes_total(), start_min + duration)
                 if end_min == start_min:
                     return
-                start_hhmm = _minute_to_hhmm(start_min)
-                end_hhmm = _minute_to_hhmm(end_min)
-                entry = self._make_entry(
-                    None, armed.id, armed.name, armed.jira_key, armed.color, day_idx,
-                    start_hhmm, end_hhmm, "", armed.jira_project, armed.issue_type,
-                )
-                new_id = self._db_add_entry(entry)
-                self._push_undo({"kind": "add", "items": [
-                    {"id": new_id, "fields": self._snapshot(entry, day_idx)}]})
-                self.selected_entry_id = new_id
-                self.refresh()
+                self._place_qdm_block(armed, day_idx, start_min, end_min)
                 return
             else:
                 end_min = min(_minutes_total(), start_min + config.SLOT_MINUTES)
@@ -1426,9 +1475,163 @@ class CalendarGrid(tk.Frame):
         end_min = max(state["anchor_minute"], state["cur_minute"])
         if end_min == start_min:
             end_min = min(_minutes_total(), start_min + config.SLOT_MINUTES)
+        armed = self.get_armed_activity()
+        if armed:
+            self._place_qdm_block(armed, day_idx, start_min, end_min)
+            return
         self._open_entry_dialog(new=True, day_idx=day_idx,
                                  start_hhmm=_minute_to_hhmm(start_min),
                                  end_hhmm=_minute_to_hhmm(end_min))
+
+    def begin_qdm_drop(self, activity: Activity, _event=None):
+        """Start a drag from the QDM list onto this grid."""
+        if self._drag_state and self._drag_state.get("mode") == "qdm-drop":
+            return
+        self._drag_state = {
+            "mode": "qdm-drop",
+            "activity": activity,
+            "anchor_day_idx": None,
+            "anchor_minute": None,
+            "cur_minute": None,
+            "grid_anchor_y": None,
+            "moved_on_grid": False,
+            "preview_rect": None,
+        }
+        try:
+            self.canvas.config(cursor="plus")
+        except tk.TclError:
+            pass
+        self._update_hint()
+        root = self.winfo_toplevel()
+        self._qdm_drop_binds = {
+            "motion": root.bind("<B1-Motion>", self._on_qdm_drop_motion, add="+"),
+            "release": root.bind("<ButtonRelease-1>", self._on_qdm_drop_release, add="+"),
+        }
+
+    def _unbind_qdm_drop(self):
+        root = self.winfo_toplevel()
+        binds = getattr(self, "_qdm_drop_binds", None) or {}
+        self._qdm_drop_binds = {}
+        for key, seq in (("motion", "<B1-Motion>"), ("release", "<ButtonRelease-1>")):
+            funcid = binds.get(key)
+            if not funcid:
+                continue
+            try:
+                root.unbind(seq, funcid)
+            except tk.TclError:
+                pass
+
+    def _canvas_xy_from_root(self, x_root, y_root):
+        try:
+            hx = self._scroll_host.winfo_rootx()
+            hy = self._scroll_host.winfo_rooty()
+            hw = self._scroll_host.winfo_width()
+            hh = self._scroll_host.winfo_height()
+            cx = self.canvas.winfo_rootx()
+            cy = self.canvas.winfo_rooty()
+        except (tk.TclError, AttributeError):
+            return None
+        if not (hx <= x_root <= hx + hw and hy <= y_root <= hy + hh):
+            return None
+        return x_root - cx, y_root - cy
+
+    def _on_qdm_drop_motion(self, event):
+        state = self._drag_state
+        if not state or state.get("mode") != "qdm-drop":
+            return
+        pos = self._canvas_xy_from_root(event.x_root, event.y_root)
+        if pos is None:
+            if state["preview_rect"] is not None:
+                self.canvas.delete(state["preview_rect"])
+                state["preview_rect"] = None
+            return
+        self._update_qdm_drop_preview(pos[0], pos[1], state)
+
+    def _update_qdm_drop_preview(self, x, y, state):
+        day_idx = self._day_idx_for_x(x)
+        if day_idx is None or y < self.header_height:
+            if state["preview_rect"] is not None:
+                self.canvas.delete(state["preview_rect"])
+                state["preview_rect"] = None
+            return
+        minute = self._snapped_minute_for_y(y)
+        if state["anchor_minute"] is None:
+            state["anchor_day_idx"] = day_idx
+            state["anchor_minute"] = minute
+            state["grid_anchor_y"] = y
+            state["cur_minute"] = minute
+        else:
+            if abs(y - (state["grid_anchor_y"] or y)) > config.DRAG_THRESHOLD_PX:
+                state["moved_on_grid"] = True
+            if state["moved_on_grid"]:
+                state["cur_minute"] = minute
+
+        day_idx = state["anchor_day_idx"]
+        start_min = state["anchor_minute"]
+        if state["moved_on_grid"]:
+            start_min = min(state["anchor_minute"], state["cur_minute"])
+            end_min = max(state["anchor_minute"], state["cur_minute"])
+            if end_min == start_min:
+                end_min = min(_minutes_total(), start_min + config.SLOT_MINUTES)
+        else:
+            end_min = min(_minutes_total(), start_min + config.QDM_DROP_MINUTES)
+            if end_min <= start_min:
+                return
+
+        x0 = self.gutter_width + day_idx * self.day_width + 3
+        x1 = x0 + self.day_width - 6
+        y0 = self.header_height + start_min * self.px_per_min
+        y1 = self.header_height + end_min * self.px_per_min
+        act = state["activity"]
+        if state["preview_rect"] is None:
+            state["preview_rect"] = self.canvas.create_rectangle(
+                x0, y0, x1, y1, fill=act.color, outline=theme.PANEL_BG, width=2, dash=(4, 2),
+            )
+        else:
+            self.canvas.coords(state["preview_rect"], x0, y0, x1, y1)
+        state["preview_start"] = start_min
+        state["preview_end"] = end_min
+        state["preview_day_idx"] = day_idx
+
+    def _on_qdm_drop_release(self, event):
+        self._unbind_qdm_drop()
+        state = self._drag_state
+        if not state or state.get("mode") != "qdm-drop":
+            return
+        self._drag_state = None
+        if state.get("preview_rect") is not None:
+            try:
+                self.canvas.delete(state["preview_rect"])
+            except tk.TclError:
+                pass
+        try:
+            self.canvas.config(cursor="")
+        except tk.TclError:
+            pass
+        if state.get("preview_day_idx") is None or state.get("preview_start") is None:
+            self._update_hint()
+            return
+        self._place_qdm_block(
+            state["activity"], state["preview_day_idx"],
+            state["preview_start"], state["preview_end"],
+        )
+
+    def _place_qdm_block(self, activity, day_idx, start_min, end_min):
+        if end_min <= start_min:
+            end_min = min(_minutes_total(), start_min + config.QDM_DROP_MINUTES)
+        if end_min <= start_min:
+            return
+        entry = self._make_entry(
+            None, activity.id, activity.name, activity.jira_key, activity.color, day_idx,
+            _minute_to_hhmm(start_min), _minute_to_hhmm(end_min), "",
+            activity.jira_project, activity.issue_type,
+        )
+        new_id = self._db_add_entry(entry)
+        self._push_undo({"kind": "add", "items": [
+            {"id": new_id, "fields": self._snapshot(entry, day_idx)}]})
+        self.selected_entry_id = new_id
+        self.clear_armed_activity()
+        self.refresh()
 
     def _finish_entry_drag(self, state):
         entry = state["orig_entry"]
@@ -1477,6 +1680,7 @@ class CalendarGrid(tk.Frame):
         # repaints whichever of them actually did something.
         if self._drag_state and self._drag_state.get("preview_rect") is not None:
             self.canvas.delete(self._drag_state["preview_rect"])
+        self._unbind_qdm_drop()
         self._drag_state = None
         self.clear_armed_activity()
         self.selected_entry_id = None
@@ -1487,9 +1691,11 @@ class CalendarGrid(tk.Frame):
     # ------------------------------------------------------------------
     def _on_hover(self, event):
         if self._drag_state:
+            self._clear_hover_preview()
             return
         entry_id = self._entry_id_at(event.x, event.y)
         if entry_id is not None:
+            self._clear_hover_preview()
             if event.state & CONTROL_STATE_MASK:
                 # Hints at the Ctrl+click-to-duplicate shortcut.
                 self.canvas.config(cursor="plus")
@@ -1500,6 +1706,48 @@ class CalendarGrid(tk.Frame):
         else:
             armed = self.get_armed_activity()
             self.canvas.config(cursor="hand2" if armed else "")
+            if armed:
+                self._clear_hover_preview()
+            else:
+                self._update_hover_preview(event.x, event.y)
+
+    def _clear_hover_preview(self):
+        if self._hover_slot is None:
+            return
+        self._hover_slot = None
+        try:
+            self.canvas.delete("hover_preview")
+        except tk.TclError:
+            pass
+
+    def _update_hover_preview(self, x: float, y: float):
+        if y < self.header_height or x < self.gutter_width:
+            self._clear_hover_preview()
+            return
+        day = self._day_idx_for_x(x)
+        if day is None:
+            self._clear_hover_preview()
+            return
+        minute = int((y - self.header_height) / self.px_per_min)
+        if minute < 0 or minute >= _minutes_total():
+            self._clear_hover_preview()
+            return
+        slot = (minute // config.SLOT_MINUTES) * config.SLOT_MINUTES
+        key = (day, slot)
+        if key == self._hover_slot:
+            return
+        self._hover_slot = key
+        self.canvas.delete("hover_preview")
+        x0 = self.gutter_width + day * self.day_width + 4
+        x1 = x0 + self.day_width - 8
+        y0 = self.header_height + slot * self.px_per_min + 1
+        y1 = y0 + self.slot_height - 2
+        self.canvas.create_rectangle(
+            x0, y0, x1, y1, fill=theme.ACCENT_SOFT, outline="", tags="hover_preview")
+        if self.canvas.find_withtag("entry"):
+            self.canvas.tag_lower("hover_preview", "entry")
+        elif self.canvas.find_withtag("today_col"):
+            self.canvas.tag_raise("hover_preview", "today_col")
 
     # ------------------------------------------------------------------
     # Right-click menu

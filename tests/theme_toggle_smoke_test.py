@@ -87,7 +87,7 @@ win.update()
 check("Settings tab opened", str(win.notebook.tab(win.settings_panel, "state")) == "normal")
 check("Theme picker shows the currently-active theme selected",
       win.settings_panel.theme_var.get() == "bubblegum_pop")
-check("System + all eighteen curated palettes plus Custom are offered",
+check("System + curated palettes plus Custom are offered",
       set(win.settings_panel.theme_swatch_canvases.keys()) == set(theme.THEME_ORDER) | {theme.CUSTOM_THEME_ID})
 win.settings_panel._select_theme("sandstone")
 win.update()
