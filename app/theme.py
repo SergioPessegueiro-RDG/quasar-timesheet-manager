@@ -108,27 +108,67 @@ def block_text_color(bg_hex: str) -> str:
     return BLOCK_TEXT_LIGHT if _is_dark(bg_hex) else BLOCK_TEXT_DARK
 
 
+def _saturation(color: str) -> float:
+    r, g, b = (c / 255.0 for c in _hex_to_rgb(color))
+    mx, mn = max(r, g, b), min(r, g, b)
+    if mx <= 1e-6:
+        return 0.0
+    return (mx - mn) / mx
+
+
+def _desaturate(color: str, amount: float) -> str:
+    r, g, b = _hex_to_rgb(color)
+    gray = 0.299 * r + 0.587 * g + 0.114 * b
+    return _rgb_to_hex((
+        r + (gray - r) * amount,
+        g + (gray - g) * amount,
+        b + (gray - b) * amount,
+    ))
+
+
+def block_fill(color: str, surface: str = None) -> str:
+    """The color actually painted for a project on the calendar/sidebar.
+
+    Stored project hexes are often neon (Material defaults, a custom
+    picker). Mixing them toward the current surface and pulling saturation
+    keeps hue identity while sitting with cream/charcoal chrome.
+    """
+    raw = (color or "").strip()
+    if not raw.startswith("#"):
+        raw = ACCENT
+    surface = surface or GRID_BG
+    sat = _saturation(raw)
+    softened = _desaturate(raw, 0.22 * sat)
+    toward = 0.16 + 0.30 * sat
+    if _is_dark(surface):
+        toward *= 0.72
+    return _mix(softened, surface, toward)
+
+
 def derive_palette(app_bg: str, panel_bg: str, text_primary: str, accent: str,
-                    danger: str = None, now_line: str = None) -> dict:
+                    danger: str = None, now_line: str = None,
+                    accent_b: str = None) -> dict:
     """Build a full ~24-color palette from four required seed colors (an
     app background, a panel/card background, a primary text color, and an
     accent) plus two optional ones (a danger/delete red and a "now" line
     color -- sensible mode-appropriate defaults are used if omitted).
 
-    This is the one place that turns "a few colors someone picked" into
-    "a fully-themed app" -- used for every one of the twenty curated
-    palettes below (each just supplies its own seeds) and for the user's
-    own Custom palette (panels.SettingsPanel's four color pickers feed
-    straight into this)."""
+    `accent_b` is an optional second stop for Accent buttons (cyan→violet
+    on the Quasar theme). When omitted it matches `accent`, so every
+    other palette stays a flat fill.
+    """
     dark = _is_dark(panel_bg)
     if danger is None:
         danger = "#E5484D" if dark else "#D6334C"
     if now_line is None:
         now_line = "#FF9500" if dark else "#FF5A36"
+    if accent_b is None:
+        accent_b = accent
 
     field_bg = _mix(panel_bg, text_primary, 0.035) if dark else panel_bg
     accent_hover = _darken(accent, 0.17)
     accent_soft = _mix(panel_bg, accent, 0.11)
+    accent_mid = accent if accent_b.upper() == accent.upper() else _mix(accent, accent_b, 0.5)
 
     return {
         "APP_BG": app_bg,
@@ -139,6 +179,7 @@ def derive_palette(app_bg: str, panel_bg: str, text_primary: str, accent: str,
         "TEXT_SECONDARY": _mix(text_primary, panel_bg, 0.38),
         "TEXT_MUTED": _mix(text_primary, panel_bg, 0.63),
         "ACCENT": accent,
+        "ACCENT_B": accent_b,
         "ACCENT_HOVER": accent_hover,
         "ACCENT_SOFT": accent_soft,
         "DANGER": danger,
@@ -147,7 +188,7 @@ def derive_palette(app_bg: str, panel_bg: str, text_primary: str, accent: str,
         "GRID_LINE": _mix(panel_bg, text_primary, 0.04),
         "GRID_LINE_HOUR": _mix(panel_bg, text_primary, 0.10),
         "HEADER_BG": _mix(panel_bg, text_primary, 0.045),
-        "TODAY_TINT": _mix(panel_bg, accent, 0.18) if dark else _mix(panel_bg, accent, 0.12),
+        "TODAY_TINT": _mix(panel_bg, accent_mid, 0.18) if dark else _mix(panel_bg, accent_mid, 0.12),
         "NOW_LINE": now_line,
         "BLOCK_BORDER": panel_bg,
         "SELECTION_OUTLINE": text_primary,
@@ -168,13 +209,23 @@ _DARK_MODE_SEEDS = dict(app_bg="#000000", panel_bg="#1C1C1E", text_primary="#F5F
 _SYSTEM_SEEDS_LIGHT = _WHITE_SEEDS
 _SYSTEM_SEEDS_DARK = _DARK_MODE_SEEDS
 
-# ---------------------------------------------------------------------------
-# Curated palettes -- Figma mood categories, then Places (city moods) and
-# Atmosphere (photograph moods). Each is a handful of seeds (see
-# derive_palette above). "category" is metadata shown as section headers
-# in the Settings picker -- THEME_ORDER below is the actual display
-# order, grouped by category so related palettes sit together.
-# ---------------------------------------------------------------------------
+# Rail Delivery Group brand tokens (Pantone 534 / 2965 / 5483 / 7546 /
+# 7579 / 158 / 7569). Not a mood palette: navy is the logo, oranges are
+# signals. Teal is a supporting cool, not the button colour — using it as
+# ACCENT washed the UI into ice-mint and hid the navy.
+_RDG_NAVY = "#1C355E"
+_RDG_SLATE = "#3D5265"
+_RDG_RUST = "#E0592B"
+_RDG_ORANGE = "#EE7624"
+_RDG_AMBER = "#DB8925"
+# Paper tinted with slate (grey-navy), not primary navy — primary has a
+# high blue channel and reads as Frozen / pack-ice when diluted.
+_RDG_PAPER = _mix("#F7F8FA", _RDG_SLATE, 0.055)
+# Night cards sit *on* the logo navy, so they have to lift off it.
+_RDG_NIGHT_PANEL = _mix(_RDG_NAVY, "#FFFFFF", 0.14)
+
+# Curated palettes. "category" is the Settings picker section heading;
+# THEME_ORDER is the display order, grouped by category.
 _PRESETS = [
     ("white", "White", "System",
      "Clean white — the default light look.",
@@ -195,6 +246,18 @@ _PRESETS = [
      "Hyprland-night rice — near-black glass and a mauve accent. Tune Translucency below.",
      dict(app_bg="#0B0D14", panel_bg="#12141C", text_primary="#F0EAF8", accent="#CBA6F7",
           danger="#F38BA8", now_line="#FAB387")),
+
+    # Brand — Rail Delivery Group. The logo navy has to appear on chrome
+    # (selected tab, Start Timer, Push), not only in body copy. Teal as
+    # accent was why RDG Light looked like the Frozen atmosphere theme.
+    ("rdg", "RDG", "Brand",
+     "Rail Delivery Group — logo navy on buttons and type, slate paper, orange now-line.",
+     dict(app_bg=_RDG_PAPER, panel_bg="#FFFFFF", text_primary=_RDG_NAVY, accent=_RDG_NAVY,
+          danger=_RDG_RUST, now_line=_RDG_ORANGE)),
+    ("rdg_night", "RDG Night", "Brand",
+     "RDG after hours — the window is logo navy, cards lift off it, orange for signals.",
+     dict(app_bg=_RDG_NAVY, panel_bg=_RDG_NIGHT_PANEL, text_primary="#F3F5F8", accent=_RDG_ORANGE,
+          danger=_RDG_RUST, now_line=_RDG_AMBER)),
 
     ("stormy_morning", "Stormy Morning", "Monochromatic",
      "Charcoal and slate-blue in one family -- calm, restrained, all business.",
@@ -241,6 +304,11 @@ _PRESETS = [
      "Rich magenta on deep violet-black -- vivid and a little electric.",
      dict(app_bg="#0F0714", panel_bg="#180D22", text_primary="#F5EAFB", accent="#C93BE0",
           danger="#FF4D6D", now_line="#FFB454")),
+    ("quasar", "Quasar", "Vibrant",
+     "Dark slate studio — luminous cyan-to-violet chrome, not a flat fill.",
+     dict(app_bg="#0B0E18", panel_bg="#151A28", text_primary="#F4F7FF",
+          accent="#2EE6C5", accent_b="#C77DFF",
+          danger="#FF6B8A", now_line="#FF6B7A")),
 
     ("slate_graphite", "Slate Graphite", "Neutral",
      "Cool graphite gray with a muted steel accent -- quiet and professional.",
@@ -512,6 +580,9 @@ TEXT_PRIMARY: str = _DEFAULT_PALETTE["TEXT_PRIMARY"]
 TEXT_SECONDARY: str = _DEFAULT_PALETTE["TEXT_SECONDARY"]
 TEXT_MUTED: str = _DEFAULT_PALETTE["TEXT_MUTED"]
 ACCENT: str = _DEFAULT_PALETTE["ACCENT"]
+ACCENT_B: str = _DEFAULT_PALETTE.get("ACCENT_B", ACCENT)
+# Extra pixels around luminous Accent buttons (Quasar's cyan→violet glow).
+ACCENT_GLOW_PAD = 8
 ACCENT_HOVER: str = _DEFAULT_PALETTE["ACCENT_HOVER"]
 ACCENT_SOFT: str = _DEFAULT_PALETTE["ACCENT_SOFT"]
 DANGER: str = _DEFAULT_PALETTE["DANGER"]
@@ -537,7 +608,7 @@ def set_theme(theme_id: str):
     the default / maps legacy light-dark values via resolve_theme_id() on
     anything else."""
     global CURRENT_THEME_ID, APP_BG, PANEL_BG, BORDER, BORDER_STRONG, TEXT_PRIMARY, \
-        TEXT_SECONDARY, TEXT_MUTED, ACCENT, ACCENT_HOVER, ACCENT_SOFT, DANGER, DANGER_SOFT, \
+        TEXT_SECONDARY, TEXT_MUTED, ACCENT, ACCENT_B, ACCENT_HOVER, ACCENT_SOFT, DANGER, DANGER_SOFT, \
         DANGER_SOFT_ACTIVE, GRID_LINE, GRID_LINE_HOUR, HEADER_BG, TODAY_TINT, NOW_LINE, \
         BLOCK_BORDER, SELECTION_OUTLINE, PREVIEW_FILL, PREVIEW_OUTLINE, FIELD_BG, SURFACE, GRID_BG
 
@@ -554,6 +625,7 @@ def set_theme(theme_id: str):
     TEXT_SECONDARY = p["TEXT_SECONDARY"]
     TEXT_MUTED = p["TEXT_MUTED"]
     ACCENT = p["ACCENT"]
+    ACCENT_B = p.get("ACCENT_B") or p["ACCENT"]
     ACCENT_HOVER = p["ACCENT_HOVER"]
     ACCENT_SOFT = p["ACCENT_SOFT"]
     DANGER = p["DANGER"]
@@ -830,6 +902,12 @@ _glass_alpha = WINDOW_ALPHA_DEFAULT
 def is_glass_theme(theme_id: str = None) -> bool:
     tid = resolve_theme_id(theme_id if theme_id is not None else CURRENT_THEME_ID)
     return tid in GLASS_THEME_IDS
+
+
+def accent_is_luminous() -> bool:
+    """True when Accent buttons should bloom (cyan→violet), not sit flat."""
+    extra = ACCENT_B or ACCENT
+    return str(extra).upper() != str(ACCENT).upper()
 
 
 def clamp_glass_alpha(value) -> float:
@@ -1209,13 +1287,19 @@ def _sdf_rounded_rect(px: float, py: float, x1: float, y1: float,
 
 
 def _coverage(distance: float) -> float:
-    """1px anti-alias ramp around the SDF zero-crossing."""
-    value = 0.5 - distance
-    if value <= 0.0:
+    """Smoothstep across ~2 logical pixels.
+
+    PhotoImages are 1 Tk-pixel and get doubled on Retina, so a 1px
+    coverage ramp becomes a 2px stair. A wider smoothstep stays round
+    after that blit.
+    """
+    width = 2.0
+    t = 0.5 - distance / width
+    if t <= 0.0:
         return 0.0
-    if value >= 1.0:
+    if t >= 1.0:
         return 1.0
-    return value
+    return t * t * (3.0 - 2.0 * t)
 
 
 def _average_hex(colors) -> str:
@@ -1255,7 +1339,7 @@ def _aa_pixel(px: float, py: float, box, radius: float, fill: str,
 
 def _make_aa_image(width: int, height: int, radius: float, fill: str,
                    background: str, outline: str, stroke: float, box=None,
-                   backgrounds=None):
+                   backgrounds=None, fill_end: str = "", glow: float = 0.0):
     import tkinter as tk
 
     width = max(1, int(width))
@@ -1263,8 +1347,15 @@ def _make_aa_image(width: int, height: int, radius: float, fill: str,
     fill = (fill or "#000000").upper()
     background = (background or "#000000").upper()
     outline = (outline or "").upper()
+    fill_end = (fill_end or "").upper()
+    if fill_end == fill:
+        fill_end = ""
+    glow = max(0.0, float(glow or 0.0))
     if box is None:
-        box = (0.5, 0.5, width - 0.5, height - 0.5)
+        if glow > 0.0:
+            box = (glow + 0.5, glow + 0.5, width - glow - 0.5, height - glow - 0.5)
+        else:
+            box = (0.5, 0.5, width - 0.5, height - 0.5)
     if backgrounds is None:
         nw = ne = sw = se = background
         uniform = True
@@ -1274,23 +1365,55 @@ def _make_aa_image(width: int, height: int, radius: float, fill: str,
         uniform = nw == ne == sw == se
         if uniform:
             background = nw
-    key = (width, height, round(float(radius), 2), fill,
+    key = (width, height, round(float(radius), 2), fill, fill_end,
            (nw, ne, sw, se) if not uniform else background, outline,
-           round(float(stroke), 2), tuple(round(v, 2) for v in box))
+           round(float(stroke), 2), tuple(round(v, 2) for v in box),
+           round(glow, 2))
     cached = _AA_IMAGE_CACHE.get(key)
     if cached is not None:
         return cached
+    span = max(width - 1, 1)
+
+    def fill_at(px):
+        if not fill_end:
+            return fill
+        t = max(0.0, min(1.0, (px - 0.5) / span))
+        return _mix(fill, fill_end, t)
+
     rows = []
     def sample(px, py, bg=background):
+        def one(sx, sy):
+            pix_fill = fill_at(sx)
+            dist = _sdf_rounded_rect(sx, sy, box[0], box[1], box[2], box[3], radius)
+            if stroke > 0.0 and outline and glow <= 0.0:
+                return _aa_pixel(sx, sy, box, radius, pix_fill, bg, outline, stroke)
+            a = _coverage(dist)
+            glow_a = 0.0
+            if glow > 0.0 and dist > 0.0:
+                t = max(0.0, 1.0 - dist / glow)
+                glow_a = t * t * 0.40
+            m = a if a >= glow_a else glow_a
+            if m <= 0.0:
+                return bg
+            if m >= 1.0:
+                return pix_fill
+            return _mix(bg, pix_fill, m)
+
         dist = _sdf_rounded_rect(px, py, box[0], box[1], box[2], box[3], radius)
-        centre = _aa_pixel(px, py, box, radius, fill, bg, outline, stroke)
-        # Interior/exterior pixels are a solid mix; only the 1px edge
-        # needs extra samples so Retina upscaling doesn't stair-step.
-        if abs(dist) > 1.15 and not (stroke > 0.0 and outline and abs(dist) < stroke + 1.15):
+        # Glow already falls off smoothly; 9-tap only the pill's own edge
+        # so Retina doesn't turn that ring into a broken black hairline.
+        if glow > 0.0 and dist > 2.4:
+            return one(px, py)
+        centre = one(px, py)
+        if abs(dist) > 2.4 and not (stroke > 0.0 and outline and abs(dist) < stroke + 2.4):
             return centre
         colors = [
-            _aa_pixel(px + dx, py + dy, box, radius, fill, bg, outline, stroke)
-            for dx, dy in ((-0.25, -0.25), (0.25, -0.25), (-0.25, 0.25), (0.25, 0.25))
+            one(px + dx, py + dy)
+            for dx, dy in (
+                (-0.33, -0.33), (0.0, -0.33), (0.33, -0.33),
+                (-0.33, 0.0), (0.0, 0.0), (0.33, 0.0),
+                (-0.33, 0.33), (0.0, 0.33), (0.33, 0.33),
+            )
         ]
         return _average_hex(colors)
 
@@ -1320,7 +1443,8 @@ def _make_aa_image(width: int, height: int, radius: float, fill: str,
 
 
 def rounded_rect_image(width: int, height: int, radius: float, fill: str,
-                       background: str, outline: str = "", outline_width: float = 1.0):
+                       background: str, outline: str = "", outline_width: float = 1.0,
+                       fill_end: str = "", glow: float = 0.0):
     """A PhotoImage of a coverage-antialiased rounded rect.
 
     Tk's `create_polygon` fill is not antialiased, so on a Retina Mac the
@@ -1329,11 +1453,19 @@ def rounded_rect_image(width: int, height: int, radius: float, fill: str,
     a smooth edge without extra dependencies, while still using whatever
     fill/outline the current theme asked for.
 
+    `fill_end` paints a left-to-right gradient (Quasar's cyan→violet
+    Accent buttons). Empty means a flat fill.
+
+    `glow` is extra pixels of quadratic falloff outside the pill — light
+    coming off the fill, not a second stacked button.
+
     Callers must keep the returned image alive (a widget attribute) so
     Tk doesn't garbage-collect it out from under the canvas.
     """
     stroke = outline_width if outline else 0.0
-    return _make_aa_image(width, height, radius, fill, background, outline, stroke)
+    return _make_aa_image(
+        width, height, radius, fill, background, outline, stroke,
+        fill_end=fill_end, glow=glow)
 
 
 def _keep_aa_image(canvas, img):
@@ -1344,6 +1476,49 @@ def _keep_aa_image(canvas, img):
     kept.append(img)
     if len(kept) > 480:
         canvas._aa_images = kept[-240:]
+
+
+def _with_transparent_outside(img, background: str):
+    """Copy of `img` whose exact-background pixels are see-through.
+
+    Tk widgets are always square; the leftover corner triangles are
+    painted in `background`. On the calendar canvas those triangles
+    stamp GRID_BG over the today tint. Punching them out lets the grid
+    show through so a drag card matches a settled block.
+    """
+    if not background or not str(background).startswith("#") or len(background) < 7:
+        return img
+    try:
+        r = int(background[1:3], 16)
+        g = int(background[3:5], 16)
+        b = int(background[5:7], 16)
+        out = img.copy()
+        w, h = int(out.width()), int(out.height())
+        # Only the rounded-rect's outside ring can be the blend color;
+        # skipping the interior keeps tall time-block punches cheap.
+        band = min(w, h) if min(w, h) <= 40 else 22
+        for y in range(h):
+            edge_y = y < band or y >= h - band
+            for x in range(w):
+                if not edge_y and band <= x < w - band:
+                    continue
+                px = out.get(x, y)
+                if isinstance(px, str):
+                    parts = px.replace(",", " ").split()
+                    got = tuple(int(float(p)) for p in parts[:3])
+                else:
+                    got = tuple(int(v) for v in px[:3])
+                if got == (r, g, b):
+                    out.transparency_set(x, y, True)
+        return out
+    except Exception:
+        return img
+
+
+def _maybe_transparent(img, background: str, transparent_outside: bool):
+    if not transparent_outside:
+        return img
+    return _with_transparent_outside(img, background)
 
 
 def _corner_patch(corner: str, size: int, radius: float, fill: str,
@@ -1362,7 +1537,8 @@ def _corner_patch(corner: str, size: int, radius: float, fill: str,
 
 def place_rounded_rect(canvas, x1, y1, x2, y2, radius: float = 8, fill: str = "",
                        outline: str = "", width: float = 1, background: str = None,
-                       corner_backgrounds=None, full: bool = False, **item_kwargs):
+                       corner_backgrounds=None, full: bool = False,
+                       transparent_outside: bool = False, **item_kwargs):
     """Draw a coverage-antialiased rounded rect on `canvas`.
 
     Small chips (buttons, thumbs, swatches, short time blocks) are a
@@ -1410,15 +1586,19 @@ def place_rounded_rect(canvas, x1, y1, x2, y2, radius: float = 8, fill: str = ""
         # path and look pixelated when you stretched duration. `full=True`
         # keeps one coverage-AA image for the whole shape.
         if full or w * h <= 48000:
-            img = _make_aa_image(
-                w, h, radius, fill, paint_bg, outline, stroke, backgrounds=bgs)
+            img = _maybe_transparent(
+                _make_aa_image(
+                    w, h, radius, fill, paint_bg, outline, stroke, backgrounds=bgs),
+                paint_bg, transparent_outside)
             _keep_aa_image(canvas, img)
             return [canvas.create_image(ox, oy, image=img, anchor="nw", **item_kwargs)]
 
         patch = max(2, int(math.ceil(radius)) + 2)
         if patch * 2 >= min(w, h):
-            img = _make_aa_image(
-                w, h, radius, fill, paint_bg, outline, stroke, backgrounds=bgs)
+            img = _maybe_transparent(
+                _make_aa_image(
+                    w, h, radius, fill, paint_bg, outline, stroke, backgrounds=bgs),
+                paint_bg, transparent_outside)
             _keep_aa_image(canvas, img)
             return [canvas.create_image(ox, oy, image=img, anchor="nw", **item_kwargs)]
 

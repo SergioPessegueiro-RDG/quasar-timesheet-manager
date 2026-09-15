@@ -82,6 +82,37 @@ class TestSearchFilterInPlace(unittest.TestCase):
             root.destroy()
             os.unlink(handle.name)
 
+    def test_collapsed_project_skips_activity_widgets(self):
+        import tempfile
+        import tkinter as tk
+        from app.db import Database
+        from app.models import Activity, Project
+        from app.sidebar import Sidebar
+
+        root = tk.Tk()
+        root.withdraw()
+        handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        handle.close()
+        db = Database(handle.name)
+        try:
+            pid = db.add_project(Project(None, "Collapsed Group", "#4C6EF5"))
+            db.add_activity(Activity(None, "Hidden QDM", None, 30, project_id=pid))
+            db.set_project_collapsed(pid, True)
+            sb = Sidebar(
+                root, db, on_change=lambda: None,
+                open_activity_panel=lambda **_k: None,
+                open_project_panel=lambda **_k: None)
+            hays = [item.get("haystack", "") for item in sb._filter_items
+                    if item["kind"] == "activity"]
+            self.assertFalse(any("hidden qdm" in (h or "") for h in hays))
+            self.assertTrue(any(
+                item["kind"] == "project" and item.get("project_id") == pid
+                for item in sb._filter_items))
+        finally:
+            db.close()
+            root.destroy()
+            os.unlink(handle.name)
+
 
 if __name__ == "__main__":
     unittest.main()

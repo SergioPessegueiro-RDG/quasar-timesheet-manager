@@ -132,7 +132,7 @@ check("Restored display name setting took effect",
       win.db.get_setting("jira_display_name") == "Someone Else")
 check("Restored theme was applied", theme.get_theme_id() == "sandstone")
 
-win.notebook.select(win.summary_panel)
+win.notebook.select(win.summary_tab)
 win.update()
 # The Summary tab is now two side-by-side pie-chart breakdowns (Project,
 # QDM/Activity) instead of one togglable list -- "Client Sync" is an

@@ -5,18 +5,15 @@ for what's elsewhere still called an Activity, matching the
 Activities-sidebar-turned-"QDM's" rename) -- using the tab's full width.
 This used to be a single list you toggled between Activity/Project
 grouping to see; both breakdowns are now always visible together. By
-Project is a pie chart, each slice labeled with its own name and
-percentage directly on the chart (see _draw_pie) -- Projects are a small,
-fairly stable set (everything gets grouped into one), so a handful of
-wedges reads faster than a list once there's more than a couple. By QDM
-is a bar chart instead (see _build_bar_row): QDM's aren't grouped the
-same way, so there can easily be far more of them than Projects, and a
-pie's fixed 360 degrees split that many ways stops being readable long
-before a plain list of full-width bars does. Both breakdowns keep a
-scrolling area below (or, for the bar chart, AS) their rows -- for the
-pie, it's a secondary reference (exact hours, or a slice too thin to
-label) capped to a small height so the chart itself gets most of the
-column.
+Project is a pie chart: large slices carry a short name and percentage,
+thin ones stay unlabeled on the ring (see slice_label_kind) and are
+named in the legend underneath -- long project titles on a 6% wedge
+used to paint over their neighbours. By QDM is a bar chart instead
+(see _build_bar_row): QDM's aren't grouped the same way, so there can
+easily be far more of them than Projects, and a pie's fixed 360 degrees
+split that many ways stops being readable long before a plain list of
+full-width bars does. The pie legend is a compact list of hours; the
+bar chart's scrolling area IS the chart.
 
 A third permanent tab alongside "Timesheet" and "Template" (never hidden,
 same as Template -- see app/main_window.py's _build_body) rather than one
@@ -45,6 +42,60 @@ from datetime import date, timedelta
 from . import config, theme
 from .db import Database
 from .widgets import CARD_RADIUS, RoundedButton, RoundedCard, ScrollArea
+
+
+# On-slice labels: a thin wedge is too narrow for a wrapped project name
+# (14° used to still print the full name, so two ~6% slices stacked their
+# text on top of each other). Name+percent needs a generous slice; a
+# bare percent can sit in a medium one; anything smaller is legend-only.
+_MIN_NAME_SWEEP_DEGREES = 48.0
+_MIN_PCT_SWEEP_DEGREES = 28.0
+
+
+def slice_label_kind(sweep_degrees: float) -> str:
+    """What, if anything, to print on a pie wedge of this sweep."""
+    if sweep_degrees >= _MIN_NAME_SWEEP_DEGREES:
+        return "name"
+    if sweep_degrees >= _MIN_PCT_SWEEP_DEGREES:
+        return "pct"
+    return "none"
+
+
+def wrap_slice_name(name: str, chars_per_line: int = 16, max_lines: int = 2) -> str:
+    """Two short lines so a slice label stays inside its wedge."""
+    text = " ".join((name or "").split())
+    if not text:
+        return ""
+    width = max(4, int(chars_per_line))
+    lines = []
+    current = ""
+    words = text.split(" ")
+    used = 0
+    for word in words:
+        trial = word if not current else f"{current} {word}"
+        if len(trial) <= width:
+            current = trial
+            used += 1
+            continue
+        if current:
+            lines.append(current)
+            current = ""
+        if len(lines) >= max_lines:
+            break
+        if len(word) > width:
+            lines.append(word[: width - 1] + "…")
+            used += 1
+            if len(lines) >= max_lines:
+                break
+            continue
+        current = word
+        used += 1
+    if current and len(lines) < max_lines:
+        lines.append(current)
+    if used < len(words) and lines and not lines[-1].endswith("…"):
+        last = lines[-1]
+        lines[-1] = last[: max(1, min(len(last), width - 1))] + "…"
+    return "\n".join(lines[:max_lines])
 
 
 def _last_day_of_month(year: int, month: int) -> date:
@@ -147,14 +198,12 @@ class SummaryPanel(tk.Frame):
             # child's space before drawing any of them, so call order
             # doesn't affect the final top-to-bottom layout): a
             # fixed-height legend, leaving the rest of the column for the
-            # pie canvas below. Each slice already carries its own name +
-            # percentage (see _draw_pie), so this scrolling legend is a
-            # secondary reference -- the exact hours, or a slice too thin
-            # to label -- rather than the primary way to read the chart,
-            # which is why it gets a modest capped height instead of
-            # splitting the column evenly with the chart; that's what
-            # lets the pie itself grow to fill most of the column.
-            legend_area = ScrollArea(frame, bg=theme.PANEL_BG, outline=False, pad=0, height=150)
+            # pie canvas. Large slices carry a short name + percent;
+            # thin ones are named only here (see slice_label_kind). The
+            # scrollbar hides unless the key actually overflows.
+            legend_area = ScrollArea(
+                frame, bg=theme.PANEL_BG, outline=False, pad=0, height=150,
+                autohide_scrollbar=True)
             legend_area.pack(side="bottom", fill="x")
             pie_canvas = tk.Canvas(frame, bg=theme.PANEL_BG, highlightthickness=0)
             pie_canvas.pack(fill="both", expand=True, pady=(0, 10))
@@ -318,27 +367,29 @@ class SummaryPanel(tk.Frame):
     def _build_legend_row(self, parent, r: dict, grand_total: int):
         row = tk.Frame(parent, bg=theme.PANEL_BG)
         row.pack(fill="x", pady=4)
+        row.columnconfigure(1, weight=1)
 
         swatch = tk.Canvas(row, width=12, height=12, bg=theme.PANEL_BG, highlightthickness=0)
-        swatch.pack(side="left", padx=(0, 8))
-        theme.place_rounded_rect(swatch, 1, 1, 11, 11, radius=3, fill=r["color"], outline="",
+        swatch.grid(row=0, column=0, sticky="nw", padx=(0, 8), pady=2)
+        theme.place_rounded_rect(swatch, 1, 1, 11, 11, radius=3, fill=theme.block_fill(r["color"]), outline="",
                                  background=theme.PANEL_BG)
+
+        name = tk.Label(row, text=r["name"], font=(self.family, 9), bg=theme.PANEL_BG,
+                        fg=theme.TEXT_PRIMARY, anchor="w", justify="left", wraplength=220)
+        name.grid(row=0, column=1, sticky="ew")
 
         hours = r["minutes"] / 60
         pct = (r["minutes"] / grand_total * 100) if grand_total else 0
         tk.Label(row, text=f"{hours:.1f}h ({pct:.0f}%)", font=(self.family, 9),
-                 bg=theme.PANEL_BG, fg=theme.TEXT_SECONDARY, width=13, anchor="e").pack(
-            side="right", padx=(6, 0))
+                 bg=theme.PANEL_BG, fg=theme.TEXT_SECONDARY, anchor="e").grid(
+            row=0, column=2, sticky="ne", padx=(8, 0))
 
-        # No fixed width here, same reasoning as the old bar rows this
-        # replaces: a name longer than some fixed character count used to
-        # render past its own allotted space instead of the row adapting.
-        # wraplength (there's no bar to shrink anymore, so wrapping to a
-        # second line is the equivalent move here) keeps a long name from
-        # pushing this column wider than the other one.
-        tk.Label(row, text=r["name"], font=(self.family, 9), bg=theme.PANEL_BG,
-                 fg=theme.TEXT_PRIMARY, anchor="w", justify="left", wraplength=130).pack(
-            side="left", fill="x", expand=True)
+        def _fit(_event=None, n=name, rw=row):
+            avail = max(80, int(rw.winfo_width()) - 120)
+            if int(n.cget("wraplength") or 0) != avail:
+                n.configure(wraplength=avail)
+
+        row.bind("<Configure>", _fit)
 
     def _build_bar_row(self, parent, r: dict, max_minutes: int, grand_total: int):
         """One row of the By QDM bar chart: name + hours/percentage on
@@ -375,17 +426,18 @@ class SummaryPanel(tk.Frame):
         track = tk.Frame(row, bg=theme.BORDER, height=14)
         track.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         frac = (r["minutes"] / max_minutes) if max_minutes else 0
-        tk.Frame(track, bg=r["color"]).place(x=0, y=0, relwidth=max(0.02, frac), relheight=1)
-
-    # Slices this thin (in degrees -- 14 degrees is a bit under 4% of the
-    # full circle) can't fit a legible name + percentage without running
-    # into their neighbors, so they keep just their color on the ring and
-    # stay nameable via the legend below instead.
-    _MIN_LABEL_SWEEP_DEGREES = 14.0
+        tk.Frame(track, bg=theme.block_fill(r["color"])).place(
+            x=0, y=0, relwidth=max(0.02, frac), relheight=1)
 
     def _draw_pie(self, canvas: tk.Canvas, rows: list, grand_total: int):
         canvas.delete("all")
         w, h = canvas.winfo_width(), canvas.winfo_height()
+        # Unmapped canvases report 1x1. cget("width") is a Tk screen
+        # distance (the default is "10c") so it cannot be passed to int().
+        if w <= 1:
+            w = int(canvas.winfo_reqwidth())
+        if h <= 1:
+            h = int(canvas.winfo_reqheight())
         if w <= 1 or h <= 1:
             return
         size = max(0, min(w, h) - 8)
@@ -396,56 +448,50 @@ class SummaryPanel(tk.Frame):
         x1, y1 = x0 + size, y0 + size
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
         radius = size / 2
-        label_font = (self.family, 11, "bold")
-        # Where inside the slice the label sits -- close enough to the
-        # center that even a fairly narrow slice's arc is wide enough at
-        # that radius to hold two short lines of text, but not so close
-        # that every label bunches up on top of each other in the middle.
-        label_radius = radius * 0.62
-        label_width = max(60, int(radius * 0.9))
+        name_font = (self.family, 10, "bold")
+        pct_font = (self.family, 11, "bold")
+        label_radius = radius * 0.58
 
         if not rows or grand_total <= 0:
-            # Empty state -- a plain muted ring rather than a blank canvas.
             canvas.create_oval(x0, y0, x1, y1, outline=theme.BORDER, width=2)
             return
 
-        # theme.block_text_color picks per-slice, not from the active app
-        # theme -- slice colors are whatever Projects were assigned,
-        # independent of light/dark theme, so contrast has to be judged
-        # per-slice. Shared with calendar_view.py's time-block labels,
-        # which have the identical problem.
         label_color = theme.block_text_color
 
-        def draw_label(mid_angle_deg: float, name: str, pct: float, color: str):
+        def draw_label(mid_angle_deg: float, name: str, pct: float, color: str, sweep: float):
+            kind = slice_label_kind(sweep)
+            if kind == "none":
+                return
             rad = math.radians(mid_angle_deg)
             lx = cx + label_radius * math.cos(rad)
             ly = cy - label_radius * math.sin(rad)
-            canvas.create_text(lx, ly, text=f"{name}\n{pct:.0f}%", fill=label_color(color),
-                                font=label_font, justify="center", width=label_width)
+            chord = abs(2 * label_radius * math.sin(math.radians(max(sweep, 1.0) / 2.0)))
+            width = max(36, int(min(radius * 0.7, chord * 0.9)))
+            if kind == "name":
+                text = f"{wrap_slice_name(name)}\n{pct:.0f}%"
+                font = name_font
+            else:
+                text = f"{pct:.0f}%"
+                font = pct_font
+            canvas.create_text(lx, ly, text=text, fill=label_color(color),
+                               font=font, justify="center", width=width)
 
-        # Standard math convention (0=east, 90=north, same as
-        # theme.rounded_rect uses) -- 90 is 12 o'clock, the usual pie
-        # chart starting point. Each slice sweeps clockwise (negative
-        # extent) proportional to its share of the period's total time,
-        # largest slice first since `rows` is already sorted that way.
         angle = 90.0
         for r in rows:
             sweep = 360.0 * (r["minutes"] / grand_total)
             if sweep <= 0:
                 continue
             if sweep >= 359.99:
-                # The one entry in this period is 100% of it --
-                # create_arc's pieslice style doesn't draw a clean full
-                # circle at extent=360, so draw a plain filled oval
-                # instead for this (fairly common, e.g. a period with
-                # just one project) case.
-                canvas.create_oval(x0, y0, x1, y1, fill=r["color"], outline=theme.PANEL_BG, width=2)
-                canvas.create_text(cx, cy, text=f'{r["name"]}\n100%', fill=label_color(r["color"]),
-                                    font=label_font, justify="center", width=label_width)
+                fill = theme.block_fill(r["color"])
+                canvas.create_oval(x0, y0, x1, y1, fill=fill, outline=theme.PANEL_BG, width=2)
+                canvas.create_text(
+                    cx, cy, text=f"{wrap_slice_name(r['name'], 22, 3)}\n100%",
+                    fill=label_color(fill), font=name_font, justify="center",
+                    width=max(60, int(radius * 1.2)))
                 break
+            fill = theme.block_fill(r["color"])
             canvas.create_arc(x0, y0, x1, y1, start=angle, extent=-sweep,
-                               fill=r["color"], outline=theme.PANEL_BG, width=2, style="pieslice")
-            if sweep >= self._MIN_LABEL_SWEEP_DEGREES:
-                pct = r["minutes"] / grand_total * 100
-                draw_label(angle - sweep / 2, r["name"], pct, r["color"])
+                               fill=fill, outline=theme.PANEL_BG, width=2, style="pieslice")
+            pct = r["minutes"] / grand_total * 100
+            draw_label(angle - sweep / 2, r["name"], pct, fill, sweep)
             angle -= sweep

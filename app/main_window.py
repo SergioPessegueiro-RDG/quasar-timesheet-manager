@@ -1,6 +1,7 @@
 """Top-level application window: header bar, sidebar, and weekly calendar grid."""
 import os
 import platform
+import queue
 import sys
 import threading
 import time
@@ -28,6 +29,16 @@ from .widgets import RoundedButton, RoundedCombobox, RoundedEntry
 class MainWindow(tk.Tk):
     def __init__(self):
         super().__init__()
+        # Don't map a half-built window. update_idletasks() in
+        # _center_on_start / diagnostics used to realize it on macOS while
+        # Template, Settings, and every QDM row were still being created —
+        # chrome appeared, the wait cursor spun, and clicks did nothing.
+        self.withdraw()
+        self._secondary_built = False
+        self._defer_secondary = False
+        self._ensuring_secondary = False
+        self._secondary_step = 0
+        self._body_gen = 0
         self.title("QUASAR Timesheet Manager")
         self.geometry("1240x680")
         self.minsize(960, 520)
@@ -108,11 +119,27 @@ class MainWindow(tk.Tk):
         self.configure(bg=theme.APP_BG)
         self._jira_sync_in_flight = False
         self._worklog_pull_seq = 0
+        # Python 3.14's Tcl refuses widget.after() from a worker thread
+        # ("main thread is not in main loop"). Background Jira/update
+        # jobs put a callback here; the main loop drains it.
+        self._ui_queue: queue.Queue = queue.Queue()
+        # CalendarGrid.__init__ emits on_week_change, which used to start
+        # the Jira worklog pull during _build_body. The fetch is threaded,
+        # but applying it (SQLite + both calendars + both sidebars) ran on
+        # the first drain — before the first paint — so the tab buttons
+        # sat invisible for a few seconds. Wait until the window has
+        # actually drawn once.
+        self._ui_ready = False
 
         self._build_menu()
         self._build_top_bar()
         self._build_body()
         self._bind_global_shortcuts()
+        self.after_idle(self._on_first_idle)
+        try:
+            self.deiconify()
+        except tk.TclError:
+            pass
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -122,17 +149,76 @@ class MainWindow(tk.Tk):
             # up blank until something forces it to repaint -- e.g. the user
             # resizing or minimizing it. Nudging the window by a pixel and
             # back right after launch forces that repaint automatically so
-            # nobody has to do it by hand.
-            self.after(150, self._nudge_to_force_repaint)
+            # nobody has to do it by hand. After the first paint, not in
+            # the same instant — that Configure used to relayout the grid.
+            self.after(600, self._nudge_to_force_repaint)
 
-        # Delayed so it never competes with getting the window itself on
-        # screen first -- the actual network call happens on a background
-        # thread regardless (see _check_for_updates), this delay is just
-        # about not kicking that thread off in the same instant as
-        # everything else __init__ is doing.
         self._jira_sync_in_flight = False
-        self.after(400, self._sync_qdms_on_startup)
-        self.after(1500, self._check_for_updates)
+        # After the window is clickable. These used to fire at 400ms and
+        # freeze the first second with a full sidebar+calendar rebuild.
+        self.after(2000, self._sync_qdms_on_startup)
+        self.after(2500, self._check_for_updates)
+
+    def _call_on_ui(self, fn):
+        """Run `fn` on the Tk main thread.
+
+        Worker threads must not call `self.after` — Tcl 8.6/9 on Python
+        3.14 raises RuntimeError. Queue the callback instead; _drain_ui_queue
+        runs it from the event loop.
+        """
+        if threading.current_thread() is threading.main_thread():
+            self.after(0, fn)
+            return
+        self._ui_queue.put(fn)
+
+    def _drain_ui_queue(self):
+        try:
+            while True:
+                fn = self._ui_queue.get_nowait()
+                try:
+                    fn()
+                except tk.TclError:
+                    break
+                except Exception:
+                    traceback.print_exc()
+        except queue.Empty:
+            pass
+        try:
+            if self.winfo_exists():
+                self.after(25, self._drain_ui_queue)
+        except tk.TclError:
+            pass
+
+    def update(self, *args, **kwargs):
+        # Smoke tests drive the window with update() instead of mainloop.
+        # Finish Template/Settings/dialogs so those assertions see widgets.
+        # mainloop() sets _defer_secondary so Timesheet can take clicks first.
+        if (
+            not getattr(self, "_defer_secondary", False)
+            and not getattr(self, "_ensuring_secondary", False)
+            and not getattr(self, "_secondary_built", True)
+            and getattr(self, "timesheet_tab", None) is not None
+        ):
+            self._ensure_secondary_tabs(now=True)
+        return tk.Tk.update(self, *args, **kwargs)
+
+    def mainloop(self, n=0):
+        self._defer_secondary = True
+        if not self._secondary_built:
+            gen = self._body_gen
+            self.after(1, lambda g=gen: self._kick_secondary(g))
+        return tk.Tk.mainloop(self, n)
+
+    def _on_first_idle(self):
+        self._ui_ready = True
+        self._drain_ui_queue()
+        # Same idle as first paint used to apply Jira worklogs (SQLite +
+        # both calendars + both sidebars) and freeze the window for a second.
+        self.after(900, self._startup_worklog_pull)
+
+    def _startup_worklog_pull(self):
+        if hasattr(self, "calendar"):
+            self._pull_worklogs_for_week(self.calendar.week_start)
 
     def _pull_worklogs_for_week(self, week_start: date):
         """Quietly import this user's Jira worklogs for the visible week.
@@ -140,6 +226,8 @@ class MainWindow(tk.Tk):
         So going back a week shows hours already logged in Jira, not just
         blocks created in this app. Local rows and pending deletes win.
         """
+        if not getattr(self, "_ui_ready", False):
+            return
         creds = self._jira_creds()
         if not creds.is_complete():
             return
@@ -157,8 +245,7 @@ class MainWindow(tk.Tk):
                     f"fetch_my_worklogs {start_date}..{end_date} failed: "
                     f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}")
                 return
-            self.after(
-                0,
+            self._call_on_ui(
                 lambda issues=issues, worklogs=worklogs, seq=seq,
                 week_start=week_start: self._apply_worklog_pull(
                     seq, week_start, issues, worklogs))
@@ -176,7 +263,6 @@ class MainWindow(tk.Tk):
             jira_client._log(f"pull_worklogs_into_db failed: {exc}\n{traceback.format_exc()}")
             return
         if result.created:
-            self.calendar.refresh()
             self._on_sidebar_change()
             self._set_jira_busy(
                 False, f"Loaded {result.created} worklog(s) from Jira.", quiet=True)
@@ -187,13 +273,13 @@ class MainWindow(tk.Tk):
         docstring for exactly what "failure" covers (no network, private
         repo, no releases yet, ...). Runs the actual HTTP request on a
         background thread since it can block for a few seconds; the
-        result comes back onto the main thread via self.after(0, ...)
+        result comes back onto the main thread via _call_on_ui
         because Tkinter widgets (the popup) can only be touched from
         there."""
         def worker():
             info = update_check.check_latest_version()
             if info is not None:
-                self.after(0, lambda: self._on_update_check_result(info))
+                self._call_on_ui(lambda: self._on_update_check_result(info))
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_update_check_result(self, info: dict):
@@ -244,9 +330,9 @@ class MainWindow(tk.Tk):
             try:
                 auto_update.perform_update(info.get("assets") or [])
             except auto_update.AutoUpdateError as exc:
-                self.after(0, lambda: self._auto_update_failed(html_url, exc))
+                self._call_on_ui(lambda: self._auto_update_failed(html_url, exc))
             else:
-                self.after(0, self._quit_for_update)
+                self._call_on_ui(self._quit_for_update)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -641,6 +727,20 @@ class MainWindow(tk.Tk):
         # destroys and rebuilds *its* children on every tab change, so
         # the CTAs live in this separate sibling frame instead of inside
         # tab_bar, where that rebuild would otherwise destroy them too.
+        self._body_gen = getattr(self, "_body_gen", 0) + 1
+        self._secondary_built = False
+        self._secondary_step = 0
+        self.template_sidebar = None
+        self.template_calendar = None
+        self.summary_panel = None
+        self.settings_panel = None
+        self.timeblock_panel = None
+        self.duplicate_panel = None
+        self.activity_panel = None
+        self.project_panel = None
+        self.backup_panel = None
+        self.export_panel = None
+
         tab_row = tk.Frame(self, bg=theme.APP_BG)
         # Equal gap above and below -- it used to be flush against the
         # separator under the Timer bar (pady top=0) while still getting
@@ -650,10 +750,10 @@ class MainWindow(tk.Tk):
 
         # pack() side=right stacks inward, so Push is packed first to stay
         # on the far right, with Export CSV immediately to its left.
-        RoundedButton(tab_row, text="Push to Jira", style="Accent.TButton",
-                      command=self._open_export_dialog).pack(side="right")
-        RoundedButton(tab_row, text="Export CSV", style="Secondary.TButton",
-                      command=self._open_export_dialog).pack(side="right", padx=(0, 8))
+        RoundedButton(tab_row, text="Push to Jira", style="Ghost.TButton",
+                      icon="jira", command=self._open_export_dialog).pack(side="right")
+        RoundedButton(tab_row, text="Export CSV", style="Ghost.TButton",
+                      icon="csv", command=self._open_export_dialog).pack(side="right", padx=(0, 8))
 
         self.tab_bar = tk.Frame(tab_row, bg=theme.APP_BG)
         self.tab_bar.pack(side="left", fill="x", expand=True)
@@ -661,19 +761,35 @@ class MainWindow(tk.Tk):
 
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         self._panels = []
 
+        # Empty shells for the four permanent tabs, then paint the strip
+        # before Sidebar/Calendar/Summary construction (that work is
+        # seconds). Bind <<NotebookTabChanged>> after this paint so each
+        # .add() doesn't rebuild the buttons four times first.
         body = tk.Frame(self.notebook, bg=theme.APP_BG)
         self.notebook.add(body, text="Timesheet")
-        self._all_tabs.append((body, "Timesheet"))
-        # Kept so _active_calendar() (see the keyboard-shortcut handlers
-        # below) can tell which tab is currently showing -- notebook.select()
-        # returns the tab *container* widget's path, not self.calendar
-        # itself, since the calendar is nested a level deeper alongside the
-        # sidebar.
         self.timesheet_tab = body
+        self._all_tabs.append((body, "Timesheet"))
+
+        template_body = tk.Frame(self.notebook, bg=theme.APP_BG)
+        self.notebook.add(template_body, text="Template")
+        self.template_tab = template_body
+        self._all_tabs.append((template_body, "Template"))
+
+        summary_host = tk.Frame(self.notebook, bg=theme.APP_BG)
+        self.notebook.add(summary_host, text="Summary")
+        self.summary_tab = summary_host
+        self._all_tabs.append((summary_host, "Summary"))
+
+        settings_host = tk.Frame(self.notebook, bg=theme.APP_BG)
+        self.notebook.add(settings_host, text="Settings")
+        self.settings_tab = settings_host
+        self._all_tabs.append((settings_host, "Settings"))
+
         self._sidebar_bodies = []
+        self._refresh_tab_bar()
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         self.sidebar = Sidebar(body, self.db, on_change=self._on_sidebar_change,
                                 open_activity_panel=self._open_activity_panel,
@@ -693,57 +809,100 @@ class MainWindow(tk.Tk):
         )
         self._place_sidebar_and_calendar(body, self.sidebar, self.calendar)
         self.sidebar.set_calendar(self.calendar)
+        # Template / Summary / Settings / dialogs are built after the
+        # Timesheet can take clicks. Building them here used to map a
+        # frozen window (especially after update_idletasks) until the
+        # sidebar scrollbar finally appeared.
+        if self._defer_secondary:
+            gen = self._body_gen
+            self.after(1, lambda g=gen: self._kick_secondary(g))
 
-        # Permanent "Template" tab -- built the same way as "Timesheet"
-        # above, but backed by TemplateEntry rows (template_mode=True) with
-        # its own Sidebar/CalendarGrid pair so arming/editing activities
-        # there doesn't interfere with whatever's armed on the real
-        # Timesheet tab. Added directly via self.notebook.add (NOT
-        # self._register_panel) so it's never auto-hidden by _show_panel.
-        template_body = tk.Frame(self.notebook, bg=theme.APP_BG)
-        self.notebook.add(template_body, text="Template")
-        self._all_tabs.append((template_body, "Template"))
-        self.template_tab = template_body
+    def _kick_secondary(self, gen=None):
+        if gen is not None and gen != self._body_gen:
+            return
+        if self._secondary_built:
+            return
+        try:
+            self._secondary_build_step()
+        except tk.TclError:
+            return
+        if not self._secondary_built:
+            self.after(1, lambda g=self._body_gen: self._kick_secondary(g))
 
-        self.template_sidebar = Sidebar(template_body, self.db, on_change=self._on_sidebar_change,
-                                         open_activity_panel=self._open_activity_panel,
-                                         open_project_panel=self._open_project_panel,
-                                         collapsed=self.sidebar_collapsed,
-                                         on_toggle_collapse=self._toggle_sidebar_collapsed,
-                                         on_jira_sync=self._sync_qdms_from_jira,
-                                         content_width=self.sidebar_width)
+    def _ensure_secondary_tabs(self, *, now: bool = False):
+        """Build Template/Summary/Settings/dialogs. `now=True` for a tab
+        click or a test that needs the widgets in this call."""
+        if self._secondary_built:
+            return
+        self._ensuring_secondary = True
+        try:
+            if now:
+                while not self._secondary_built:
+                    self._secondary_build_step()
+                return
+            gen = self._body_gen
+            self.after(1, lambda g=gen: self._kick_secondary(g))
+        finally:
+            self._ensuring_secondary = False
+
+    def _secondary_build_step(self):
+        step = self._secondary_step
+        if step == 0:
+            self._build_template_tab()
+        elif step == 1:
+            self._build_summary_tab()
+        elif step == 2:
+            self._build_settings_tab()
+        else:
+            self._build_dialog_panels()
+            self._secondary_built = True
+            self._refresh_tab_bar()
+            return
+        self._secondary_step = step + 1
+
+    def _build_template_tab(self):
+        if self.template_calendar is not None:
+            return
+        # Same layout as Timesheet, TemplateEntry rows (template_mode=True),
+        # own Sidebar/CalendarGrid so arming here doesn't touch Timesheet.
+        self.template_sidebar = Sidebar(
+            self.template_tab, self.db, on_change=self._on_sidebar_change,
+            open_activity_panel=self._open_activity_panel,
+            open_project_panel=self._open_project_panel,
+            collapsed=self.sidebar_collapsed,
+            on_toggle_collapse=self._toggle_sidebar_collapsed,
+            on_jira_sync=self._sync_qdms_from_jira,
+            content_width=self.sidebar_width)
         self.template_calendar = CalendarGrid(
-            template_body, self.db,
+            self.template_tab, self.db,
             get_armed_activity=lambda: self.template_sidebar.get_armed_activity(),
             clear_armed_activity=lambda: self.template_sidebar.clear_armed(),
             open_time_block=self._open_time_block_panel,
             open_duplicate=self._open_duplicate_panel,
             template_mode=True,
         )
-        self._place_sidebar_and_calendar(template_body, self.template_sidebar, self.template_calendar)
+        self._place_sidebar_and_calendar(
+            self.template_tab, self.template_sidebar, self.template_calendar)
         self.template_sidebar.set_calendar(self.template_calendar)
 
-        # Permanent "Summary" tab -- like Template, added directly via
-        # self.notebook.add (not self._register_panel) so it's never
-        # auto-hidden; it's a place you come back to, not a one-shot dialog.
-        self.summary_panel = SummaryPanel(self.notebook, self.db, family=self.family)
-        self.notebook.add(self.summary_panel, text="Summary")
-        self._all_tabs.append((self.summary_panel, "Summary"))
+    def _build_summary_tab(self):
+        if self.summary_panel is not None:
+            return
+        self.summary_panel = SummaryPanel(self.summary_tab, self.db, family=self.family)
+        self.summary_panel.pack(fill="both", expand=True)
 
-        # Permanent "Settings" tab -- same treatment as Template/Summary
-        # above (added directly, never auto-hidden) instead of the
-        # hide-until-opened panel it used to be, reached by a header
-        # button that's now gone. on_close no longer hides this tab (there
-        # would be nothing left to switch back to it with) -- Save/Cancel
-        # just jump back to the Timesheet tab, same "you're done, here's
-        # your other work" feel as before, minus actually disappearing.
+    def _build_settings_tab(self):
+        if self.settings_panel is not None:
+            return
         self.settings_panel = SettingsPanel(
-            self.notebook, family=self.family,
+            self.settings_tab, family=self.family,
             on_close=lambda: self.notebook.select(0))
-        self.notebook.add(self.settings_panel, text="Settings")
-        self._all_tabs.append((self.settings_panel, "Settings"))
+        self.settings_panel.pack(fill="both", expand=True)
         self._load_settings_panel()
 
+    def _build_dialog_panels(self):
+        if self.timeblock_panel is not None:
+            return
         self.timeblock_panel = TimeBlockPanel(
             self.notebook, family=self.family,
             on_close=lambda: self._hide_panel(self.timeblock_panel))
@@ -777,17 +936,19 @@ class MainWindow(tk.Tk):
             on_close=lambda: self._hide_panel(self.export_panel))
         self._register_panel(self.export_panel, "Export")
 
-        self._refresh_tab_bar()
-
     def _on_sidebar_change(self):
         # Both tabs share the same activities/projects tables, so an
         # arm/edit/delete on either sidebar needs to refresh both
         # calendars, both sidebars, and the timer bar's activity picker
         # to stay in sync.
         self.calendar.refresh()
-        self.template_calendar.refresh()
+        template_cal = getattr(self, "template_calendar", None)
+        if template_cal is not None:
+            template_cal.refresh()
         self.sidebar.refresh()
-        self.template_sidebar.refresh()
+        template_sb = getattr(self, "template_sidebar", None)
+        if template_sb is not None:
+            template_sb.refresh()
         self.timer_bar.refresh_activities()
 
     def _create_project_inline(self, name: str) -> Project:
@@ -821,9 +982,9 @@ class MainWindow(tk.Tk):
         if not current:
             return None
         if hasattr(self, "timesheet_tab") and current == str(self.timesheet_tab):
-            return self.calendar
+            return getattr(self, "calendar", None)
         if hasattr(self, "template_tab") and current == str(self.template_tab):
-            return self.template_calendar
+            return getattr(self, "template_calendar", None)
         return None
 
     def _active_sidebar(self):
@@ -849,21 +1010,27 @@ class MainWindow(tk.Tk):
             sb._add_project()
 
     def _on_tab_changed(self, event=None):
+        try:
+            current = self.notebook.select()
+        except tk.TclError:
+            current = None
+        if current:
+            if hasattr(self, "template_tab") and current == str(self.template_tab):
+                self._ensure_secondary_tabs(now=True)
+            elif hasattr(self, "summary_tab") and current == str(self.summary_tab):
+                self._ensure_secondary_tabs(now=True)
+            elif hasattr(self, "settings_tab") and current == str(self.settings_tab):
+                self._ensure_secondary_tabs(now=True)
         self._refresh_tab_bar()
         cal = self._active_calendar()
         if cal is not None:
             cal.canvas.focus_set()
         # The Summary tab doesn't live-update while entries change on the
         # other tabs, so refresh its totals every time it becomes visible.
-        # (Unlike Timesheet/Template, summary_panel itself IS the tab
-        # widget -- there's no separate container Frame to compare against.)
-        if hasattr(self, "summary_panel"):
-            try:
-                current = self.notebook.select()
-            except tk.TclError:
-                current = None
-            if current and current == str(self.summary_panel):
-                self.summary_panel.refresh()
+        summary = getattr(self, "summary_panel", None)
+        if summary is not None and hasattr(self, "summary_tab"):
+            if current and current == str(self.summary_tab):
+                summary.refresh()
 
     @staticmethod
     def _is_typing_target(widget) -> bool:
@@ -985,6 +1152,7 @@ class MainWindow(tk.Tk):
         self.notebook.select(0)
 
     def _open_time_block_panel(self, **kwargs):
+        self._ensure_secondary_tabs(now=True)
         kwargs["known_jira_projects"] = self.db.list_known_jira_projects()
         inner_save = kwargs.get("on_save")
         kwargs["on_save"] = lambda result, inner=inner_save: self._save_time_block_and_status(inner, result)
@@ -1004,7 +1172,7 @@ class MainWindow(tk.Tk):
             except Exception as exc:
                 jira_client._log(f"list_transitions {issue_key} failed: {exc}")
                 transitions = []
-            self.after(0, lambda trans=transitions: done(trans))
+            self._call_on_ui(lambda trans=transitions: done(trans))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1045,14 +1213,17 @@ class MainWindow(tk.Tk):
         return ok
 
     def _open_duplicate_panel(self, **kwargs):
+        self._ensure_secondary_tabs(now=True)
         self.duplicate_panel.load(**kwargs)
         self._show_panel(self.duplicate_panel)
 
     def _open_activity_panel(self, activity, on_save, on_delete=None):
+        self._ensure_secondary_tabs(now=True)
         self.activity_panel.load(activity, on_save, on_delete)
         self._show_panel(self.activity_panel)
 
     def _open_project_panel(self, project, on_save, on_delete=None):
+        self._ensure_secondary_tabs(now=True)
         self.project_panel.load(project, on_save, on_delete)
         self._show_panel(self.project_panel)
 
@@ -1102,6 +1273,8 @@ class MainWindow(tk.Tk):
         built once in _build_body, this runs once at build time instead,
         and again from _open_settings_dialog below just to stay safe if
         anything reaches that path."""
+        if self.settings_panel is None:
+            return
         display_name = self.db.get_setting("jira_display_name", "") or ""
         current_theme_id = theme.get_theme_id()
         current_work_start_hour = config.START_HOUR
@@ -1184,10 +1357,12 @@ class MainWindow(tk.Tk):
         # jumps the notebook to it, still wired up from the Settings/View
         # menu's "Jira Export Settings…"/"Theme…" entries now that the
         # header button that used to call this is gone.
+        self._ensure_secondary_tabs(now=True)
         self._load_settings_panel()
-        self.notebook.select(self.settings_panel)
+        self.notebook.select(self.settings_tab)
 
     def _open_backup_dialog(self):
+        self._ensure_secondary_tabs(now=True)
         self._show_panel(self.backup_panel)
 
     def _backup_data(self, path: str):
@@ -1226,6 +1401,7 @@ class MainWindow(tk.Tk):
         messagebox.showinfo("Restore Complete", "Your data has been restored.")
 
     def _open_export_dialog(self):
+        self._ensure_secondary_tabs(now=True)
         def on_export(start_date, end_date):
             self._do_export(start_date, end_date)
 
@@ -1265,10 +1441,11 @@ class MainWindow(tk.Tk):
                 self.config(cursor="watch" if busy else "")
             except tk.TclError:
                 pass
-        if hasattr(self, "settings_panel"):
+        settings = getattr(self, "settings_panel", None)
+        if settings is not None:
             try:
                 if status:
-                    self.settings_panel.jira_status_label.config(text=status)
+                    settings.jira_status_label.config(text=status)
                 elif not busy:
                     pass
             except tk.TclError:
@@ -1292,9 +1469,9 @@ class MainWindow(tk.Tk):
             except Exception as exc:
                 err = str(exc)
                 jira_client._log(f"test_connection failed: {type(exc).__name__}: {exc}")
-                self.after(0, lambda err=err: self._jira_job_failed("Jira", err))
+                self._call_on_ui(lambda err=err: self._jira_job_failed("Jira", err))
                 return
-            self.after(0, lambda: self._jira_test_ok(name))
+            self._call_on_ui(lambda: self._jira_test_ok(name))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1355,13 +1532,11 @@ class MainWindow(tk.Tk):
                 jira_client._log(
                     f"fetch_issues failed: {type(exc).__name__}: {exc}\n"
                     f"{traceback.format_exc()}")
-                self.after(
-                    0,
+                self._call_on_ui(
                     lambda err=err, quiet=quiet: self._jira_job_failed(
                         "Sync QDMs", err, quiet=quiet))
                 return
-            self.after(
-                0,
+            self._call_on_ui(
                 lambda fetched=fetched, quiet=quiet: self._apply_jira_sync(
                     fetched, quiet=quiet))
 
@@ -1386,7 +1561,8 @@ class MainWindow(tk.Tk):
 
     def _on_jira_sync_done(self, result: jira_sync.SyncResult, quiet: bool = False):
         self._jira_sync_in_flight = False
-        self._on_sidebar_change()
+        if result.created or result.updated or result.projects_created:
+            self._on_sidebar_change()
         self._set_jira_busy(False, f"Fetched {result.fetched} assigned QDM(s).", quiet=quiet)
         if quiet:
             return
@@ -1507,11 +1683,11 @@ class MainWindow(tk.Tk):
             except Exception as exc:
                 err = str(exc)
                 jira_client._log(f"push_worklogs failed: {exc}\n{traceback.format_exc()}")
-                self.after(0, lambda err=err: self._jira_job_failed("Push to Jira", err))
+                self._call_on_ui(lambda err=err: self._jira_job_failed("Push to Jira", err))
                 return
             finally:
                 db.close()
-            self.after(0, lambda: self._on_jira_push_done(result))
+            self._call_on_ui(lambda: self._on_jira_push_done(result))
 
         threading.Thread(target=worker, daemon=True).start()
 

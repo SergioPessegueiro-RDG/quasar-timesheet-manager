@@ -170,8 +170,16 @@ DB_PATH = os.path.join(APP_DIR, "timesheet.db")
 # not a color of their own (chrome/UI colors live in app/theme.py)
 # ---------------------------------------------------------------------------
 DEFAULT_PROJECT_COLORS = [
-    "#4C6EF5", "#12B886", "#F76707", "#E64980", "#7048E8",
-    "#1098AD", "#F59F00", "#82C91E", "#E03131", "#495057",
+    "#6B8AA8",  # slate blue
+    "#6F9B86",  # sage
+    "#C4896A",  # terracotta
+    "#B57A8C",  # dusty rose
+    "#8A7EAD",  # muted violet
+    "#6A9AA3",  # dusty teal
+    "#C4A46A",  # ochre
+    "#8A9B6A",  # olive
+    "#B07A74",  # clay
+    "#7A8088",  # warm gray
 ]
 
 # ---------------------------------------------------------------------------

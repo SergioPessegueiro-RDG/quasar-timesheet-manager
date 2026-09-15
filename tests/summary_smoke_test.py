@@ -69,7 +69,7 @@ db.add_time_entry(TimeEntry(None, meetings.id, meetings.name, meetings.jira_key,
                              (week_start + timedelta(days=2)).isoformat(), "13:00", "14:00", ""))  # 1h Wednesday
 
 print("\n--- Switching to the Summary tab shows this week's totals in both breakdowns ---")
-win.notebook.select(summary)
+win.notebook.select(win.summary_tab)
 win.update()
 check("_active_calendar() is None while Summary tab is active", win._active_calendar() is None)
 check("Summary panel defaults to week mode", summary.mode == "week")
@@ -134,7 +134,7 @@ win.notebook.select(win.timesheet_tab)
 win.update()
 db.add_time_entry(TimeEntry(None, meetings.id, meetings.name, meetings.jira_key, meetings.color,
                              (week_start + timedelta(days=3)).isoformat(), "10:00", "11:00", ""))  # +1h Meetings
-win.notebook.select(summary)
+win.notebook.select(win.summary_tab)
 win.update()
 check("Switching onto the Summary tab auto-refreshed to include the new entry (6.0h total)",
       summary._qdm["total_label"].cget("text") == "Total: 6.0h across 2 QDM's")

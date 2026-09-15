@@ -95,6 +95,8 @@ class Sidebar(tk.Frame):
         self._search_job = None
         self._filter_items: List[dict] = []
         self._empty_search = None
+        self._activity_rows_complete = False
+        self._rows_include_collapsed_children = False
         # Project ids whose closed-ticket subsection is currently expanded.
         # In-memory only: closed lists start collapsed every session so a
         # large backlog doesn't paint itself on launch.
@@ -241,6 +243,15 @@ class Sidebar(tk.Frame):
 
     def _flush_search(self):
         self._search_job = None
+        q = bool(self._search_query().strip())
+        # Collapsed groups skip activity widgets until needed. Rebuild
+        # only when that set of widgets must change — not on every letter.
+        if q and not self._activity_rows_complete:
+            self._render_rows()
+            return
+        if (not q) and self._rows_include_collapsed_children:
+            self._render_rows()
+            return
         self._apply_filter()
 
     def _track(self, widget, pack, **meta):
@@ -382,8 +393,14 @@ class Sidebar(tk.Frame):
             child.destroy()
 
         if self.collapsed:
+            self._activity_rows_complete = True
+            self._rows_include_collapsed_children = False
             self._render_collapsed_rail()
             return
+
+        searching = bool(self._search_query().strip())
+        skipped_collapsed = False
+        self._rows_include_collapsed_children = False
 
         if not self._activities or not any(not a.is_closed() for a in self._activities):
             empty = tk.Label(self.list_frame, text="No QDM's yet. Sync from Jira, or File → New QDM.",
@@ -391,6 +408,8 @@ class Sidebar(tk.Frame):
                       font=(self.family, 9), justify="left")
             empty.pack(pady=14, padx=8)
             self._attach_wraplength(empty)
+            self._activity_rows_complete = True
+            self._rows_include_collapsed_children = False
             self.list_container.bind_wheel_recursive(self.list_frame)
             return
 
@@ -414,13 +433,19 @@ class Sidebar(tk.Frame):
                 # sit under a group that has open work assigned to you.
                 continue
             self._render_project_header(project, len(open_acts), len(closed_acts))
-            if open_acts:
-                for act in open_acts:
-                    self._render_activity_row(act)
+            show_children = searching or not project.collapsed
+            if not show_children:
+                skipped_collapsed = True
+                continue
+            if project.collapsed:
+                self._rows_include_collapsed_children = True
+            for act in open_acts:
+                self._render_activity_row(act)
             if closed_acts:
                 self._render_closed_toggle(project, len(closed_acts))
-                for act in closed_acts:
-                    self._render_activity_row(act)
+                if searching or project.id in self._show_closed_for:
+                    for act in closed_acts:
+                        self._render_activity_row(act)
 
         empty = tk.Label(self.list_frame, text="No QDMs match that search.",
                          fg=theme.TEXT_MUTED, bg=theme.PANEL_BG,
@@ -429,6 +454,7 @@ class Sidebar(tk.Frame):
         self._track(empty, dict(pady=14, padx=8), kind="empty_search")
         self._attach_wraplength(empty)
 
+        self._activity_rows_complete = not skipped_collapsed
         self._apply_filter()
         # Belt-and-braces alongside ScrollArea's own auto-rebind-on-resize
         # (see widgets.ScrollArea._on_content_configure) -- collapsing/
@@ -436,6 +462,16 @@ class Sidebar(tk.Frame):
         # (one project's rows appear as another's disappear), which
         # wouldn't otherwise trigger a re-bind of the freshly-created rows.
         self.list_container.bind_wheel_recursive(self.list_frame)
+
+    def _chip(self, bg: str, pack: dict, **meta):
+        """One rounded project/QDM row inside the sidebar card."""
+        card = RoundedCard(
+            self.list_frame, bg=bg, radius=10, pad=10,
+            outline=False, shrink=True, outer_bg=theme.PANEL_BG)
+        self._track(card, pack, **meta)
+        inner = tk.Frame(card.body, bg=bg)
+        inner.pack(fill="both", expand=True)
+        return card, inner
 
     def _render_collapsed_rail(self):
         """Collapsed mode's whole "list": one small color dot per Project,
@@ -448,7 +484,10 @@ class Sidebar(tk.Frame):
                 continue
             dot = tk.Canvas(self.list_frame, width=12, height=12, bg=theme.PANEL_BG,
                              highlightthickness=0, cursor="hand2")
-            dot.create_oval(1, 1, 11, 11, fill=project.color, outline="")
+            theme.place_rounded_rect(
+                dot, 1, 1, 11, 11, radius=5,
+                fill=theme.block_fill(project.color), outline="",
+                background=theme.PANEL_BG, full=True)
             dot.pack(pady=4)
             if self.on_toggle_collapse is not None:
                 dot.bind("<Button-1>", lambda e: self.on_toggle_collapse())
@@ -456,16 +495,15 @@ class Sidebar(tk.Frame):
     def _render_activity_row(self, act: Activity):
         armed = act.id == self.armed_activity_id
         closed = act.is_closed()
-        row_bg = theme.ACCENT_SOFT if armed else theme.PANEL_BG
-
-        row = tk.Frame(self.list_frame, bg=row_bg, cursor="hand2")
-        self._track(row, dict(fill="x", padx=6, pady=(2, 2)),
-                    kind="activity", activity=act, project_id=act.project_id,
-                    closed=closed, haystack=qdm_haystack(act))
+        row_bg = theme.ACCENT_SOFT if armed else theme.HEADER_BG
+        card, row = self._chip(
+            row_bg, dict(fill="x", padx=(16, 6), pady=(2, 2)),
+            kind="activity", activity=act, project_id=act.project_id,
+            closed=closed, haystack=qdm_haystack(act))
 
         # Every Activity lives inside a Project, so it's always indented
         # under that Project's header to keep the grouping visually obvious.
-        spacer = tk.Frame(row, bg=row_bg, width=18)
+        spacer = tk.Frame(row, bg=row_bg, width=8)
         spacer.pack(side="left", fill="y")
 
         accent_bar = tk.Frame(row, bg=(theme.ACCENT if armed else row_bg), width=3)
@@ -481,7 +519,10 @@ class Sidebar(tk.Frame):
         # Activity docstring) -- as a reminder of which Project it belongs
         # to even when its Project header has scrolled out of view.
         dot = tk.Canvas(top_line, width=10, height=10, bg=row_bg, highlightthickness=0)
-        dot.create_oval(0, 0, 10, 10, fill=act.color, outline="")
+        theme.place_rounded_rect(
+            dot, 0, 0, 10, 10, radius=5,
+            fill=theme.block_fill(act.color), outline="",
+            background=row_bg, full=True)
         dot.pack(side="left", padx=(0, 7))
         if armed:
             name_fg = theme.ACCENT
@@ -529,11 +570,11 @@ class Sidebar(tk.Frame):
             widget.bind("<Double-Button-1>", lambda e, a=act: self._edit_activity(a))
             widget.bind("<Button-3>", lambda e, a=act: self._context_menu(e, a))
 
-        clickable = [row, content, top_line, dot] + content.winfo_children() + top_line.winfo_children()
+        clickable = [card, row, content, top_line, dot] + content.winfo_children() + top_line.winfo_children()
         for widget in clickable:
             bind_all(widget)
         if not armed:
-            self._bind_hover(row, row_bg, theme.SURFACE)
+            self._bind_hover(row, row_bg, theme.SURFACE, card=card)
 
     def _set_tree_bg(self, widget, bg: str):
         try:
@@ -544,12 +585,14 @@ class Sidebar(tk.Frame):
         for child in widget.winfo_children():
             self._set_tree_bg(child, bg)
 
-    def _bind_hover(self, row, rest_bg: str, hover_bg: str):
+    def _bind_hover(self, row, rest_bg: str, hover_bg: str, card=None):
         if rest_bg == hover_bg:
             return
 
         def enter(_event=None):
             self._set_tree_bg(row, hover_bg)
+            if card is not None:
+                card.set_fill(hover_bg)
 
         def leave(event):
             try:
@@ -558,10 +601,12 @@ class Sidebar(tk.Frame):
                 w = None
             cur = w
             while cur is not None:
-                if cur is row:
+                if cur is row or cur is card:
                     return
                 cur = getattr(cur, "master", None)
             self._set_tree_bg(row, rest_bg)
+            if card is not None:
+                card.set_fill(rest_bg)
 
         def bind(widget):
             widget.bind("<Enter>", enter, add="+")
@@ -570,6 +615,9 @@ class Sidebar(tk.Frame):
                 bind(child)
 
         bind(row)
+        if card is not None:
+            card.bind("<Enter>", enter, add="+")
+            card.bind("<Leave>", leave, add="+")
 
     def _render_closed_toggle(self, project: Project, closed_count: int):
         expanded = project.id in self._show_closed_for
@@ -598,16 +646,15 @@ class Sidebar(tk.Frame):
                 self._show_closed_for.discard(pid)
             else:
                 self._show_closed_for.add(pid)
-            self._apply_filter()
+            self._render_rows()
 
         for widget in (row, arrow_canvas, label):
             widget.bind("<Button-1>", toggle)
 
     def _render_project_header(self, project: Project, open_count: int, closed_count: int = 0):
-        row = tk.Frame(self.list_frame, bg=theme.HEADER_BG)
-        self._track(row, dict(fill="x", padx=6, pady=(8, 2)),
-                    kind="project", project_id=project.id)
-
+        card, row = self._chip(
+            theme.HEADER_BG, dict(fill="x", padx=6, pady=(6, 3)),
+            kind="project", project_id=project.id)
         content = tk.Frame(row, bg=theme.HEADER_BG)
         content.pack(side="left", fill="both", expand=True, padx=(6, 8), pady=7)
 
@@ -635,7 +682,10 @@ class Sidebar(tk.Frame):
         # its Activities' time blocks actually shows -- is visible right on
         # its own header, not just inferred from its Activities' dots.
         swatch = tk.Canvas(content, width=10, height=10, bg=theme.HEADER_BG, highlightthickness=0)
-        swatch.create_oval(0, 0, 10, 10, fill=project.color, outline="")
+        theme.place_rounded_rect(
+            swatch, 0, 0, 10, 10, radius=5,
+            fill=theme.block_fill(project.color), outline="",
+            background=theme.HEADER_BG, full=True)
         swatch.pack(side="left", padx=(0, 6))
 
         count_bits = []
@@ -662,9 +712,9 @@ class Sidebar(tk.Frame):
             widget.bind("<Double-Button-1>", lambda e, p=project: self._edit_project(p))
             widget.bind("<Button-3>", lambda e, p=project: self._project_context_menu(e, p))
 
-        for widget in [row, content] + content.winfo_children():
+        for widget in [card, row, content] + content.winfo_children():
             bind_edit_and_menu(widget)
-        self._bind_hover(row, theme.HEADER_BG, theme.SURFACE)
+        self._bind_hover(row, theme.HEADER_BG, theme.SURFACE, card=card)
 
     # ------------------------------------------------------------------
     # Activities

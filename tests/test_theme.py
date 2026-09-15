@@ -48,6 +48,46 @@ class TestRoundedRectSdf(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_transparent_outside_punches_the_corner_cutouts(self):
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            canvas = tk.Canvas(root, width=80, height=80, bg="#010101")
+            ids = theme.place_rounded_rect(
+                canvas, 0, 0, 40, 40, radius=12, fill="#CC3333",
+                outline="", background="#010101", full=True,
+                transparent_outside=True)
+            self.assertTrue(ids)
+            img = canvas.itemcget(ids[0], "image")
+            photo = canvas.tk.call("image", "type", img)  # just prove it exists
+            self.assertEqual(str(photo), "photo")
+            punched = theme._with_transparent_outside(
+                theme._make_aa_image(40, 40, 12, "#CC3333", "#010101", "", 0.0),
+                "#010101")
+            self.assertTrue(punched.transparency_get(0, 0))
+            self.assertFalse(punched.transparency_get(20, 20))
+        finally:
+            root.destroy()
+
+    def test_block_fill_mutes_neon_toward_the_surface(self):
+        previous = theme.get_theme_id()
+        try:
+            theme.set_theme("white")
+            neon = "#E03131"
+            muted = theme.block_fill(neon)
+            self.assertTrue(muted.startswith("#"))
+            self.assertNotEqual(muted.upper(), neon)
+            # Closer to the cream grid than the raw alarm-red.
+            def lum(hex_color):
+                r, g, b = theme._hex_to_rgb(hex_color)
+                return 0.299 * r + 0.587 * g + 0.114 * b
+            self.assertGreater(lum(muted), lum(neon))
+            self.assertLess(theme._saturation(muted), theme._saturation(neon))
+        finally:
+            theme.set_theme(previous)
+
     def test_outline_sits_outside_the_fill(self):
         fill = "#4C6EF5"
         outline = "#111111"
@@ -77,6 +117,68 @@ class TestPlaceAndAtmosphereThemes(unittest.TestCase):
         self.assertEqual(theme.THEMES["white"]["palette"]["PANEL_BG"], "#FFFFFF")
         self.assertTrue(theme._is_dark(theme.THEMES["dark_mode"]["palette"]["PANEL_BG"]))
         self.assertEqual(theme.THEME_ORDER[:3], ["white", "dark_mode", "system"])
+
+    def test_rdg_brand_themes_use_the_official_navy(self):
+        self.assertEqual(theme.THEMES["rdg"]["category"], "Brand")
+        self.assertEqual(theme.THEMES["rdg_night"]["category"], "Brand")
+        light = theme.THEMES["rdg"]["palette"]
+        night = theme.THEMES["rdg_night"]["palette"]
+        self.assertEqual(light["TEXT_PRIMARY"], "#1C355E")
+        self.assertEqual(light["ACCENT"], "#1C355E")
+        self.assertEqual(light["DANGER"], "#E0592B")
+        self.assertEqual(light["NOW_LINE"], "#EE7624")
+        self.assertFalse(theme._is_dark(light["PANEL_BG"]))
+        self.assertEqual(night["APP_BG"], "#1C355E")
+        self.assertEqual(night["ACCENT"], "#EE7624")
+        self.assertTrue(theme._is_dark(night["PANEL_BG"]))
+        self.assertTrue(theme._is_dark(night["APP_BG"]))
+        ar, ag, ab = theme._hex_to_rgb(light["APP_BG"])
+        self.assertLess(ab - ar, 12)
+        self.assertIn("rdg", theme.THEME_ORDER)
+        self.assertIn("rdg_night", theme.THEME_ORDER)
+        self.assertLess(theme.THEME_ORDER.index("rdg"), theme.THEME_ORDER.index("stormy_morning"))
+
+    def test_quasar_theme_is_a_cyan_to_violet_studio(self):
+        self.assertIn("quasar", theme.THEMES)
+        self.assertEqual(theme.THEMES["quasar"]["category"], "Vibrant")
+        pal = theme.THEMES["quasar"]["palette"]
+        self.assertEqual(pal["ACCENT"], "#2EE6C5")
+        self.assertEqual(pal["ACCENT_B"], "#C77DFF")
+        self.assertNotEqual(pal["ACCENT"], pal["ACCENT_B"])
+        self.assertTrue(theme._is_dark(pal["PANEL_BG"]))
+        self.assertIn("quasar", theme.THEME_ORDER)
+        previous = theme.get_theme_id()
+        try:
+            theme.set_theme("quasar")
+            self.assertTrue(theme.accent_is_luminous())
+            theme.set_theme("white")
+            self.assertFalse(theme.accent_is_luminous())
+        finally:
+            theme.set_theme(previous)
+
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            img = theme.rounded_rect_image(
+                40, 20, 8, "#2EE6C5", "#151A28", fill_end="#C77DFF")
+            self.assertEqual(img.width(), 40)
+            bloom = theme.rounded_rect_image(
+                48, 28, 6, "#2EE6C5", "#0B0E18", fill_end="#C77DFF", glow=8)
+            def rgb(px):
+                if isinstance(px, str):
+                    parts = px.replace(",", " ").split()
+                    return tuple(int(float(p)) for p in parts[:3])
+                return tuple(int(v) for v in px[:3])
+            self.assertEqual(rgb(bloom.get(0, 0)), (0x0B, 0x0E, 0x18))
+            centre = rgb(bloom.get(24, 14))
+            self.assertGreater(centre[1], centre[0])  # cyan-ish, not the navy plate
+            # Just outside the pill: glow, not a navy/black hairline.
+            rim = rgb(bloom.get(6, 14))
+            self.assertNotEqual(rim, (0x0B, 0x0E, 0x18))
+            self.assertGreater(rim[1], 0x12)
+        finally:
+            root.destroy()
 
     def test_new_scenic_ids_are_in_the_picker(self):
         for theme_id in ("cairo_sun", "fuji_night", "harbor_dusk",
@@ -166,8 +268,40 @@ class TestRoundedWidgets(unittest.TestCase):
             self.assertEqual(str(painted.cget("bg")).upper(), "#654321")
             self.assertEqual(str(painted._canvas.cget("bg")).upper(), "#654321")
 
+            painted.set_corner_backgrounds({
+                "nw": "#112233", "ne": "#112233",
+                "sw": "#445566", "se": "#445566",
+            })
+            self.assertEqual(str(painted.cget("bg")).upper(), "#112233")
+            self.assertEqual(str(painted._canvas.cget("bg")).upper(), "#112233")
+            self.assertEqual(painted._corner_bgs["se"].upper(), "#445566")
+
+            from app.widgets import RoundedButton
+            previous = theme.get_theme_id()
+            try:
+                theme.set_theme("white")
+                flat = RoundedButton(root, text="Go", style="Accent.TButton")
+                flat_h = int(flat.cget("height"))
+                theme.set_theme("quasar")
+                glow = RoundedButton(root, text="Go", style="Accent.TButton")
+                self.assertGreater(int(glow.cget("height")), flat_h)
+                with_icon = RoundedButton(
+                    root, text="Export CSV", style="Ghost.TButton", icon="csv")
+                self.assertGreater(
+                    int(with_icon.cget("width")),
+                    int(RoundedButton(root, text="Export CSV", style="Ghost.TButton").cget("width")))
+                jira_btn = RoundedButton(
+                    root, text="Push to Jira", style="Ghost.TButton", icon="jira")
+                self.assertGreater(int(jira_btn.cget("width")), 40)
+                play = RoundedButton(root, text="Start Timer", style="Accent.TButton", icon="play")
+                self.assertEqual(play._icon, "play")
+            finally:
+                theme.set_theme(previous)
+
             from app.widgets import _hex_bg_at
             self.assertEqual(_hex_bg_at(root, 0, 0, "#3AAFA9").upper(), "#3AAFA9")
+            self.assertEqual(
+                _hex_bg_at(root, 0, 0, "#3AAFA9", ignore=root).upper(), "#3AAFA9")
         finally:
             root.destroy()
 

@@ -18,7 +18,8 @@ from . import config, theme
 from .jira_client import preferred_close_transition
 from .models import Activity
 from .sidebar import qdm_combo_rows
-from .widgets import RoundedButton, RoundedCombobox, ScrollArea, show_saved_toast
+from .panels import _rebind_wheel, _scroll_body
+from .widgets import RoundedButton, RoundedCombobox, show_saved_toast
 
 # Shown at the end of the Jira Project dropdown as a way to add a value
 # that isn't in the known-projects list yet (see TimeBlockPanel.load's
@@ -70,7 +71,7 @@ def activity_matching_jira_project(activities: List[Activity], project: str) -> 
 
 class TimeBlockPanel(tk.Frame):
     def __init__(self, master, family: str, on_close: Callable[[], None]):
-        super().__init__(master, bg=theme.PANEL_BG)
+        super().__init__(master, bg=theme.APP_BG)
         self.family = family
         self.on_close = on_close
         self.on_save: Optional[Callable[[dict], bool]] = None
@@ -92,12 +93,8 @@ class TimeBlockPanel(tk.Frame):
         self._previous_jira_project = ""
         self._syncing = False
 
-        # Wrapped in a borderless ScrollArea (see panels._scroll_body's
-        # docstring for the same rationale) so this panel's Save/Cancel/
-        # Delete row is always reachable even on a shorter window.
-        self._scroll = ScrollArea(self, bg=theme.PANEL_BG, outline=False, pad=0)
-        self._scroll.pack(fill="both", expand=True)
-        outer = tk.Frame(self._scroll.content, bg=theme.PANEL_BG)
+        body = _scroll_body(self)
+        outer = tk.Frame(body, bg=theme.PANEL_BG)
         outer.pack(fill="both", expand=True, padx=28, pady=24)
 
         self.heading = tk.Label(outer, text="Time Block", font=(self.family, 14, "bold"),
@@ -490,7 +487,7 @@ class TimeBlockPanel(tk.Frame):
                       command=self._cancel).pack(side="right")
         RoundedButton(self.btns, text="Save", style="Accent.TButton",
                       command=self._save).pack(side="right", padx=6)
-        self._scroll.bind_wheel_recursive(self.btns)
+        _rebind_wheel(self.btns)
 
         if require_notes:
             self.notes_text.focus_set()

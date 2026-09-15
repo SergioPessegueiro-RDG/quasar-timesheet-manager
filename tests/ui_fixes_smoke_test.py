@@ -99,12 +99,12 @@ win.update()
 check("Opening Settings does not hide the still-open Duplicate tab (Settings isn't part of that single-extra-tab mechanism)",
       str(win.notebook.tab(win.duplicate_panel, "state")) == "normal")
 check("Settings tab is selected",
-      str(win.notebook.tab(win.settings_panel, "state")) == "normal"
-      and win.notebook.select() == str(win.settings_panel))
+      str(win.notebook.tab(win.settings_tab, "state")) == "normal"
+      and win.notebook.select() == str(win.settings_tab))
 win.settings_panel._cancel()
 win.update()
 check("Settings tab stays present (it's permanent) after Cancel -- Cancel just navigates back to Timesheet",
-      str(win.notebook.tab(win.settings_panel, "state")) == "normal"
+      str(win.notebook.tab(win.settings_tab, "state")) == "normal"
       and win.notebook.select() == str(win.timesheet_tab))
 
 win._open_export_dialog()

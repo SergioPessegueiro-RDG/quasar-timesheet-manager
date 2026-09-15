@@ -53,18 +53,14 @@ _SHORTCUTS = [
 
 
 def _scroll_body(master, **kwargs) -> tk.Frame:
-    """Every embedded panel's content goes inside one of these instead of
-    packing straight into the panel Frame -- a plain ScrollArea with no
-    visible border (outline=False) and no inset (pad=0), so nothing looks
-    different from before, but content that doesn't fit the window (a lot
-    of fields stacked up, or the Settings tab's theme previews) can
-    still be scrolled to and its Save/Cancel/Delete buttons are never
-    stranded off the bottom of an un-maximized window."""
+    """Rounded page card for an embedded tab (Settings, Export, Time Block,
+    …). Packed inset on APP_BG so the square scroll canvas doesn't cover
+    the rounded corners — pad=0 flush-fill was that square plate."""
     kwargs.setdefault("bg", theme.PANEL_BG)
     kwargs.setdefault("outline", False)
-    kwargs.setdefault("pad", 0)
+    kwargs.setdefault("radius", 14)
     area = ScrollArea(master, **kwargs)
-    area.pack(fill="both", expand=True)
+    area.pack(fill="both", expand=True, padx=16, pady=(8, 16))
     # Stashed so _rebind_wheel (below) can find the owning ScrollArea from
     # any descendant widget without every panel needing to keep its own
     # reference around.
@@ -137,7 +133,7 @@ def _rebind_wheel(widget):
 # ---------------------------------------------------------------------------
 class DuplicatePanel(tk.Frame):
     def __init__(self, master, family: str, on_close: Callable[[], None]):
-        super().__init__(master, bg=theme.PANEL_BG)
+        super().__init__(master, bg=theme.APP_BG)
         self.family = family
         self.on_close = on_close
         self.on_duplicate: Optional[Callable[[List[int]], None]] = None
@@ -232,7 +228,7 @@ class ActivityPanel(tk.Frame):
     def __init__(self, master, family: str, on_close: Callable[[], None],
                  get_projects: Callable[[], List[Project]],
                  create_project: Callable[[str], Project]):
-        super().__init__(master, bg=theme.PANEL_BG)
+        super().__init__(master, bg=theme.APP_BG)
         self.family = family
         self.on_close = on_close
         self.get_projects = get_projects
@@ -440,7 +436,7 @@ class ActivityPanel(tk.Frame):
 # ---------------------------------------------------------------------------
 class ProjectPanel(tk.Frame):
     def __init__(self, master, family: str, on_close: Callable[[], None]):
-        super().__init__(master, bg=theme.PANEL_BG)
+        super().__init__(master, bg=theme.APP_BG)
         self.family = family
         self.on_close = on_close
         self.on_save: Optional[Callable[[dict], bool]] = None
@@ -489,8 +485,11 @@ class ProjectPanel(tk.Frame):
         palette = ttk.Frame(frm)
         palette.grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 12))
         for c in config.DEFAULT_PROJECT_COLORS:
-            sw = tk.Canvas(palette, width=24, height=24, bg=c, highlightthickness=1,
-                            highlightbackground=theme.BORDER_STRONG, cursor="hand2")
+            sw = tk.Canvas(palette, width=24, height=24, bg=theme.PANEL_BG, highlightthickness=0,
+                            cursor="hand2")
+            theme.place_rounded_rect(
+                sw, 2, 2, 22, 22, radius=6, fill=theme.block_fill(c), outline="",
+                background=theme.PANEL_BG, full=True)
             sw.pack(side="left", padx=3)
             sw.bind("<Button-1>", lambda e, col=c: self._set_color(col))
         row += 1
@@ -536,7 +535,7 @@ class ProjectPanel(tk.Frame):
     def _draw_swatch(self):
         self.swatch.delete("all")
         theme.place_rounded_rect(self.swatch, 2, 2, 24, 24, radius=5,
-                                 fill=self.selected_color.get(), outline="",
+                                 fill=theme.block_fill(self.selected_color.get()), outline="",
                                  background=self.swatch.cget("bg"))
 
     def _set_color(self, color):
@@ -576,7 +575,7 @@ class ProjectPanel(tk.Frame):
 # ---------------------------------------------------------------------------
 class SettingsPanel(tk.Frame):
     def __init__(self, master, family: str, on_close: Callable[[], None]):
-        super().__init__(master, bg=theme.PANEL_BG)
+        super().__init__(master, bg=theme.APP_BG)
         self.family = family
         self.on_close = on_close
         self.on_save: Optional[Callable[[str, str, int, int, bool], None]] = None
@@ -600,8 +599,6 @@ class SettingsPanel(tk.Frame):
         self.glass_alpha_frame: Optional[tk.Frame] = None
         self._glass_alpha_on_load = theme.get_glass_alpha()
 
-        # The theme preview grid plus every field below it can run
-        # taller than a smaller (non-maximized) window -- see _scroll_body.
         body = _scroll_body(self)
         outer = tk.Frame(body, bg=theme.PANEL_BG)
         outer.pack(fill="both", expand=True, padx=28, pady=24)
@@ -1160,7 +1157,7 @@ class BackupPanel(tk.Frame):
 
     def __init__(self, master, family: str, on_close: Callable[[], None],
                  on_backup: Callable[[str], None], on_restore: Callable[[str], None]):
-        super().__init__(master, bg=theme.PANEL_BG)
+        super().__init__(master, bg=theme.APP_BG)
         self.family = family
         self.on_close = on_close
         self.on_backup = on_backup
@@ -1227,7 +1224,7 @@ class BackupPanel(tk.Frame):
 # ---------------------------------------------------------------------------
 class ExportPanel(tk.Frame):
     def __init__(self, master, family: str, on_close: Callable[[], None]):
-        super().__init__(master, bg=theme.PANEL_BG)
+        super().__init__(master, bg=theme.APP_BG)
         self.family = family
         self.on_close = on_close
         self.on_export: Optional[Callable[[str, str], None]] = None
@@ -1275,8 +1272,8 @@ class ExportPanel(tk.Frame):
         RoundedButton(btns, text="Cancel", style="Secondary.TButton", command=self._cancel).pack(side="right")
         RoundedButton(btns, text="Export CSV…", style="Secondary.TButton", command=self._export).pack(
             side="right", padx=6)
-        RoundedButton(btns, text="Push to Jira", style="Accent.TButton", command=self._push).pack(
-            side="right", padx=(0, 6))
+        RoundedButton(btns, text="Push to Jira", style="Ghost.TButton",
+                      icon="jira", command=self._push).pack(side="right", padx=(0, 6))
 
     def load(self, week_start: date, on_export: Callable[[str, str], None],
               on_push: Optional[Callable[[str, str], None]] = None):

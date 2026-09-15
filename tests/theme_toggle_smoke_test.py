@@ -84,7 +84,7 @@ win.update()
 print("\n--- Settings panel's theme picker reflects and can change the active theme ---")
 win._open_settings_dialog()
 win.update()
-check("Settings tab opened", str(win.notebook.tab(win.settings_panel, "state")) == "normal")
+check("Settings tab opened", str(win.notebook.tab(win.settings_tab, "state")) == "normal")
 check("Theme picker shows the currently-active theme selected",
       win.settings_panel.theme_var.get() == "bubblegum_pop")
 check("System + curated palettes plus Custom are offered",

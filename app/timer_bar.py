@@ -57,7 +57,7 @@ class TimerBar(tk.Frame):
         # the picker when the label swaps (this whole cluster is packed
         # to the right of the header).
         self.toggle_btn = RoundedButton(inner, text="Start Timer", style="Accent.TButton",
-                                         command=self._toggle, bg=bg, width=11)
+                                         command=self._toggle, bg=bg, width=11, icon="play")
         self.toggle_btn.pack(side="left")
 
         # A small drawn dot rather than a colored emoji/glyph for the
@@ -210,12 +210,12 @@ class TimerBar(tk.Frame):
 
     # ------------------------------------------------------------------
     def _render_idle(self):
-        self.toggle_btn.config(text="Start Timer", style="Accent.TButton")
+        self.toggle_btn.config(text="Start Timer", style="Accent.TButton", icon="play")
         self.dot.delete("all")
         self.elapsed_label.config(text="")
 
     def _render_running(self):
-        self.toggle_btn.config(text="Stop Timer", style="Danger.TButton")
+        self.toggle_btn.config(text="Stop Timer", style="Danger.TButton", icon="stop")
         self.dot.delete("all")
         self.dot.create_oval(0, 0, 10, 10, fill=theme.DANGER, outline="")
 

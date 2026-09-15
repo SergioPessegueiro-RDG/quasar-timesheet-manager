@@ -170,8 +170,11 @@ class CalendarGrid(tk.Frame):
         # immediately, then fold further events into one redraw.
         self._resize_job: Optional[str] = None
         self._pending_viewport: Optional[Tuple[int, int]] = None
+        self._grid_painted = False
+        self._entry_paint_job: Optional[str] = None
         self._hover_slot: Optional[Tuple[int, int]] = None
         self._qdm_drop_binds: dict = {}
+        self._qdm_ghost = None
 
         # Which block (by id), if any, is currently keyboard-selected -- set
         # by clicking a block without dragging it, or by dragging one to a
@@ -195,7 +198,9 @@ class CalendarGrid(tk.Frame):
 
         self._build_widgets()
         self._drag_state = None
-        self.refresh()
+        # Fitted column width comes from _scroll_host <Configure>. Drawing
+        # here at DAY_WIDTH_PX first, then again at the real size, is the
+        # visible "calendar adjusting" jump on launch.
         self._emit_week_change()
 
     # ------------------------------------------------------------------
@@ -480,12 +485,20 @@ class CalendarGrid(tk.Frame):
         viewport -- see the long comment where _scroll_host is built).
         Recompute day-column width/slot height to fit it, then hand off
         to _recompute_grid_dimensions for the rest."""
+        if event.width <= 1 or event.height <= 1:
+            return
         if self._relayout_deferred:
             self._pending_viewport = (event.width, event.height)
             return
         size = (event.width, event.height)
         if size == self._last_viewport_size:
             return
+        # A 1px Cocoa nudge (see MainWindow._nudge_to_force_repaint) must
+        # not wipe-and-redraw the grid.
+        if self._last_viewport_size != (0, 0):
+            lw, lh = self._last_viewport_size
+            if abs(event.width - lw) <= 2 and abs(event.height - lh) <= 2:
+                return
         self._pending_viewport = size
         # First layout has to paint immediately so the grid isn't empty
         # for a frame. After that, coalesce Configure events so dragging
@@ -535,22 +548,34 @@ class CalendarGrid(tk.Frame):
         num_days = len(config.DAY_NAMES)
         num_slots = _minutes_total() / config.SLOT_MINUTES
 
-        available_w = max(0, viewport_w - self.gutter_width)
-        raw_day_width = available_w / num_days if num_days else config.DAY_WIDTH_PX
-        new_day_width = config.zoom_clamp(raw_day_width, config.MIN_DAY_WIDTH_PX,
-                                           config.MAX_DAY_WIDTH_PX, self._zoom_mult)
-
         available_h = max(0, viewport_h - self.header_height - config.CANVAS_BOTTOM_PAD_PX)
         raw_slot_height = available_h / num_slots if num_slots else config.SLOT_HEIGHT_PX
         new_slot_height = config.zoom_clamp(raw_slot_height, config.MIN_SLOT_HEIGHT_PX,
                                              config.MAX_SLOT_HEIGHT_PX, self._zoom_mult)
+        content_h = self.header_height + num_slots * new_slot_height + config.CANVAS_BOTTOM_PAD_PX
+
+        # The vertical scrollbar isn't mapped on the first layout, so the
+        # host is ~12px too wide. Fitting to that width and then showing
+        # the bar is the visible "calendar jumps left" on launch.
+        available_w = max(0, viewport_w - self.gutter_width - self._vscroll_reserve_px(
+            viewport_h, content_h))
+        raw_day_width = available_w / num_days if num_days else config.DAY_WIDTH_PX
+        new_day_width = config.zoom_clamp(raw_day_width, config.MIN_DAY_WIDTH_PX,
+                                           config.MAX_DAY_WIDTH_PX, self._zoom_mult)
+
+        content_w = self.gutter_width + num_days * new_day_width
+        if (
+            self._grid_painted
+            and abs(new_day_width - self.day_width) < 0.51
+            and abs(new_slot_height - self.slot_height) < 0.51
+        ):
+            self._update_scrollbars(viewport_w, viewport_h, content_w, content_h)
+            return
 
         self.day_width = new_day_width
         self.slot_height = new_slot_height
         self.px_per_min = self.slot_height / config.SLOT_MINUTES
 
-        content_w = self.gutter_width + num_days * self.day_width
-        content_h = self.header_height + num_slots * self.slot_height + config.CANVAS_BOTTOM_PAD_PX
         self.canvas.config(width=content_w, height=content_h)
         self._scroll_host.itemconfigure(self._canvas_window, width=content_w, height=content_h)
         self._scroll_host.config(scrollregion=(0, 0, content_w, content_h))
@@ -561,7 +586,22 @@ class CalendarGrid(tk.Frame):
         self._totals_host.config(scrollregion=(0, 0, content_w, config.TOTALS_ROW_HEIGHT_PX))
         self._totals_host.xview_moveto(self._scroll_host.xview()[0])
 
-        self.refresh()
+        # Grid chrome first so the window can take clicks; AA time-block
+        # images are the expensive part and run on the next tick.
+        self.refresh(paint_entries=False)
+        self._grid_painted = True
+        self._schedule_entry_paint()
+
+    def _vscroll_reserve_px(self, viewport_h, content_h) -> int:
+        """Pixels to hold for a not-yet-mapped vertical scrollbar."""
+        if content_h <= viewport_h + 0.5:
+            return 0
+        try:
+            if self._vscroll.winfo_ismapped():
+                return 0
+        except (tk.TclError, AttributeError):
+            pass
+        return VectorScrollbar.WIDTH
 
     def _on_grid_xscroll(self, first, last):
         """xscrollcommand for _scroll_host (see where it's configured,
@@ -1026,8 +1066,10 @@ class CalendarGrid(tk.Frame):
     # ------------------------------------------------------------------
     # Drawing
     # ------------------------------------------------------------------
-    def refresh(self):
+    def refresh(self, *, paint_entries: bool = True):
         """Redraw the whole grid + entries from the database."""
+        if paint_entries:
+            self._cancel_entry_paint()
         c = self.canvas
         c.delete("all")
         c._aa_images = []
@@ -1122,17 +1164,45 @@ class CalendarGrid(tk.Frame):
         if self.selected_entry_id is not None and self.selected_entry_id not in self.entries_by_id:
             self.selected_entry_id = None
 
-        for day_idx, day_entries in enumerate(entries_by_day):
-            layout = self._layout_day_entries(day_entries)
-            for e in day_entries:
-                assert e.id is not None
-                col_idx, col_count = layout[e.id]
-                self._draw_entry(e, day_idx, col_idx, col_count,
-                                  is_selected=(e.id == self.selected_entry_id))
+        if paint_entries:
+            for day_idx, day_entries in enumerate(entries_by_day):
+                layout = self._layout_day_entries(day_entries)
+                for e in day_entries:
+                    assert e.id is not None
+                    col_idx, col_count = layout[e.id]
+                    self._draw_entry(e, day_idx, col_idx, col_count,
+                                      is_selected=(e.id == self.selected_entry_id))
 
         self._draw_day_totals(totals, today)
 
         c.config(scrollregion=c.bbox("all"))
+
+    def _schedule_entry_paint(self):
+        if self._entry_paint_job is not None:
+            return
+        try:
+            self._entry_paint_job = self.after(1, self._paint_entries)
+        except tk.TclError:
+            self._entry_paint_job = None
+
+    def _paint_entries(self):
+        self._entry_paint_job = None
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        self.refresh()
+
+    def _cancel_entry_paint(self):
+        job = self._entry_paint_job
+        if job is None:
+            return
+        self._entry_paint_job = None
+        try:
+            self.after_cancel(job)
+        except tk.TclError:
+            pass
 
     def _draw_day_totals(self, totals: List[int], today: date):
         """Paint each day's hours at the same x as that day's grid column."""
@@ -1185,7 +1255,7 @@ class CalendarGrid(tk.Frame):
         if dropping:
             act = self._drag_state["activity"]
             self.hint_label.config(
-                text=f"  Drop “{act.name}” — {config.QDM_DROP_MINUTES} min, drag to set duration  ",
+                text=f"  Drop “{act.name}” on a day — {config.QDM_DROP_MINUTES} min, then add a description  ",
                 bg=theme.ACCENT_SOFT, fg=theme.ACCENT,
             )
         elif armed:
@@ -1256,6 +1326,16 @@ class CalendarGrid(tk.Frame):
 
         return result
 
+    def _day_column_bg(self, day_idx: int) -> str:
+        """The grid color actually sitting under this day column.
+
+        Today's column is TODAY_TINT, not GRID_BG. PhotoImage corners that
+        blend toward GRID_BG stamp a black square over that tint.
+        """
+        if (not self.template_mode) and self.day_date(day_idx) == date.today():
+            return theme.TODAY_TINT
+        return theme.GRID_BG
+
     def _entry_geometry(self, entry: EntryLike, day_idx: int, col_index: int = 0, col_count: int = 1):
         day_x0 = self.gutter_width + day_idx * self.day_width + 3
         day_x1 = day_x0 + self.day_width - 6
@@ -1276,12 +1356,17 @@ class CalendarGrid(tk.Frame):
 
     _PREVIEW_CORNER_STEPS = max(18, int(config.BLOCK_CORNER_RADIUS * 2.5))
 
-    def _set_live_block(self, state, key, x0, y0, x1, y1, *, fill, outline, width=1):
+    def _set_live_block(self, state, key, x0, y0, x1, y1, *, fill, outline="", width=0,
+                         mute=True):
         """Rounded live preview that can be reshaped every motion event.
 
-        A PhotoImage per pixel hitchs; a dashed `create_rectangle` is what
-        made stretched blocks look pixelated while you set duration.
+        Settled blocks are coverage-AA PhotoImages. Live resize/move keeps
+        a polygon so a new image isn't rasterized on every pixel; fill is
+        still the muted project color, and a PhotoImage is restored on
+        mouse-up via refresh().
         """
+        if mute:
+            fill = theme.block_fill(fill)
         radius = min(config.BLOCK_CORNER_RADIUS, max(0.0, (x1 - x0) / 2), max(0.0, (y1 - y0) / 2))
         points = theme.rounded_rect_points(
             x0, y0, x1, y1, radius=radius, steps=self._PREVIEW_CORNER_STEPS)
@@ -1291,6 +1376,10 @@ class CalendarGrid(tk.Frame):
                 points, fill=fill, outline=outline, width=width, joinstyle="round")
         else:
             self.canvas.coords(item, *points)
+            try:
+                self.canvas.itemconfigure(item, fill=fill)
+            except tk.TclError:
+                pass
 
     def _entry_text_lines(self, entry: EntryLike, x0, y0, x1, y1):
         """Fit name / notes / time inside the block, wrapping long text
@@ -1349,15 +1438,17 @@ class CalendarGrid(tk.Frame):
         # high-contrast outline instead of the normal thin one -- the same
         # SELECTION_OUTLINE color every theme defines but nothing drew with
         # until this keyboard-selection feature existed.
-        outline_color = theme.SELECTION_OUTLINE if is_selected else theme.darken(entry.color, 0.18)
-        outline_width = 3 if is_selected else 1
+        fill = theme.block_fill(entry.color)
+        outline_color = theme.SELECTION_OUTLINE if is_selected else ""
+        outline_width = 2.5 if is_selected else 0
         ids = theme.place_rounded_rect(
             self.canvas, x0, y0, x1, y1, radius=config.BLOCK_CORNER_RADIUS,
-            fill=entry.color, outline=outline_color, width=outline_width,
-            background=theme.GRID_BG, tags=("entry", tag), full=True,
+            fill=fill, outline=outline_color, width=outline_width,
+            background=self._day_column_bg(day_idx), tags=("entry", tag), full=True,
+            transparent_outside=True,
         )
         rect = ids[-1]
-        text_color = theme.block_text_color(entry.color)
+        text_color = theme.block_text_color(fill)
         for text, is_bold, ty in self._entry_text_lines(entry, x0, y0, x1, y1):
             item = self.canvas.create_text(
                 x0 + 8, ty, text=text, anchor="nw",
@@ -1495,6 +1586,8 @@ class CalendarGrid(tk.Frame):
         if not self._drag_state:
             return
         state = self._drag_state
+        if state.get("mode") == "qdm-drop":
+            return
         dx = event.x - state["anchor_x"]
         dy = event.y - state["anchor_y"]
         if abs(dx) > config.DRAG_THRESHOLD_PX or abs(dy) > config.DRAG_THRESHOLD_PX:
@@ -1529,7 +1622,7 @@ class CalendarGrid(tk.Frame):
 
         self._set_live_block(
             state, "preview_rect", x0, y0, x1, y1,
-            fill=theme.PREVIEW_FILL, outline=theme.PREVIEW_OUTLINE)
+            fill=theme.PREVIEW_FILL, mute=False)
 
     def _update_entry_drag_preview(self, event, state: dict):
         entry = state["orig_entry"]
@@ -1543,7 +1636,8 @@ class CalendarGrid(tk.Frame):
                 self.canvas.delete(item)
             state["drag_rect_id"] = None
             state["drag_text_id"] = self.canvas.create_text(
-                0, 0, text="", anchor="nw", fill=theme.block_text_color(entry.color),
+                0, 0, text="", anchor="nw",
+                fill=theme.block_text_color(theme.block_fill(entry.color)),
                 font=(self.family, 8, "bold"), justify="left",
             )
 
@@ -1581,7 +1675,7 @@ class CalendarGrid(tk.Frame):
         y1 = self.header_height + new_end * self.px_per_min
         self._set_live_block(
             state, "drag_rect_id", x0, y0, x1, y1,
-            fill=entry.color, outline=theme.PANEL_BG, width=2)
+            fill=entry.color)
         rect_id = state["drag_rect_id"]
 
         label = entry.activity_name
@@ -1644,30 +1738,143 @@ class CalendarGrid(tk.Frame):
                                  end_hhmm=_minute_to_hhmm(end_min),
                                  require_notes=True)
 
-    def begin_qdm_drop(self, activity: Activity, _event=None):
-        """Start a drag from the QDM list onto this grid."""
+    def begin_qdm_drop(self, activity: Activity, event=None):
+        """Start a drag from the QDM list onto this grid.
+
+        A card follows the pointer on the grid (drawn like a time block,
+        not a rectangular window). The slot under the pointer is always a
+        30-minute block on that day — duration is edited on the Time
+        Block tab after drop, so crossing Monday on the way to Tuesday
+        cannot lock the day.
+        """
         if self._drag_state and self._drag_state.get("mode") == "qdm-drop":
             return
         self._drag_state = {
             "mode": "qdm-drop",
             "activity": activity,
-            "anchor_day_idx": None,
-            "anchor_minute": None,
-            "cur_minute": None,
-            "grid_anchor_y": None,
-            "moved_on_grid": False,
             "preview_rect": None,
+            "preview_day_idx": None,
+            "preview_start": None,
+            "preview_end": None,
         }
         try:
             self.canvas.config(cursor="plus")
+            self.winfo_toplevel().config(cursor="plus")
         except tk.TclError:
             pass
+        self._ensure_qdm_ghost(activity, event)
         self._update_hint()
         root = self.winfo_toplevel()
         self._qdm_drop_binds = {
             "motion": root.bind("<B1-Motion>", self._on_qdm_drop_motion, add="+"),
             "release": root.bind("<ButtonRelease-1>", self._on_qdm_drop_release, add="+"),
         }
+
+    def _ensure_qdm_ghost(self, activity: Activity, event=None):
+        if self._qdm_ghost is not None:
+            return
+        fill = theme.block_fill(activity.color or theme.ACCENT)
+        fg = theme.block_text_color(fill)
+        name = (activity.name or "").strip() or "QDM"
+        title_lines = wrap_block_text(name, 28)[:2] or [name]
+        meta_bits = []
+        if (activity.jira_key or "").strip():
+            meta_bits.append(activity.jira_key.strip())
+        meta_bits.append(f"{config.QDM_DROP_MINUTES} min")
+        meta = " · ".join(meta_bits)
+        title_font = tkfont.Font(family=self.family, size=10, weight="bold")
+        meta_font = tkfont.Font(family=self.family, size=8)
+        pad = 10
+        text_w = max(
+            [title_font.measure(line) for line in title_lines] + [meta_font.measure(meta), 120]
+        )
+        line_h = int(title_font.metrics("linespace"))
+        meta_h = int(meta_font.metrics("linespace"))
+        self._qdm_ghost = {
+            "fill": fill,
+            "fg": fg,
+            "title_lines": title_lines,
+            "meta": meta,
+            "title_font": title_font,
+            "meta_font": meta_font,
+            "pad": pad,
+            "line_h": line_h,
+            "w": int(text_w + pad * 2),
+            "h": int(pad * 2 + line_h * len(title_lines) + 2 + meta_h),
+            "ids": [],
+            "origin": None,
+        }
+        if event is not None:
+            self._place_qdm_ghost(event.x_root, event.y_root)
+
+    def _raise_qdm_ghost(self):
+        ghost = self._qdm_ghost
+        if not ghost:
+            return
+        try:
+            self.canvas.tag_raise("qdm_ghost")
+        except tk.TclError:
+            pass
+
+    def _place_qdm_ghost(self, x_root, y_root):
+        ghost = self._qdm_ghost
+        if not ghost:
+            return
+        pos = self._canvas_xy_from_root(x_root, y_root, require_inside=False)
+        if pos is None:
+            return
+        x0 = pos[0] + 16
+        y0 = pos[1] + 16
+        x1 = x0 + ghost["w"]
+        y1 = y0 + ghost["h"]
+        last = ghost.get("origin")
+        try:
+            if not ghost["ids"]:
+                ids = theme.place_rounded_rect(
+                    self.canvas, x0, y0, x1, y1,
+                    radius=config.BLOCK_CORNER_RADIUS,
+                    fill=ghost["fill"], outline="",
+                    background=theme.GRID_BG, full=True,
+                    transparent_outside=True,
+                    tags=("qdm_ghost",),
+                )
+                pad = ghost["pad"]
+                ty = y0 + pad
+                for line in ghost["title_lines"]:
+                    ids.append(self.canvas.create_text(
+                        x0 + pad, ty, text=line, anchor="nw",
+                        font=ghost["title_font"], fill=ghost["fg"],
+                        tags=("qdm_ghost",),
+                    ))
+                    ty += ghost["line_h"]
+                ids.append(self.canvas.create_text(
+                    x0 + pad, ty + 2, text=ghost["meta"], anchor="nw",
+                    font=ghost["meta_font"], fill=ghost["fg"],
+                    tags=("qdm_ghost",),
+                ))
+                ghost["ids"] = ids
+                ghost["origin"] = (x0, y0)
+            elif last != (x0, y0):
+                self.canvas.move("qdm_ghost", x0 - last[0], y0 - last[1])
+                ghost["origin"] = (x0, y0)
+            self.canvas.tag_raise("qdm_ghost")
+        except tk.TclError:
+            pass
+
+    def _destroy_qdm_ghost(self):
+        ghost = self._qdm_ghost
+        self._qdm_ghost = None
+        if not ghost:
+            return
+        try:
+            self.canvas.delete("qdm_ghost")
+        except tk.TclError:
+            pass
+        for item in ghost.get("ids") or []:
+            try:
+                self.canvas.delete(item)
+            except tk.TclError:
+                pass
 
     def _unbind_qdm_drop(self):
         root = self.winfo_toplevel()
@@ -1681,61 +1888,82 @@ class CalendarGrid(tk.Frame):
                 root.unbind(seq, funcid)
             except tk.TclError:
                 pass
-
-    def _canvas_xy_from_root(self, x_root, y_root):
         try:
-            hx = self._scroll_host.winfo_rootx()
-            hy = self._scroll_host.winfo_rooty()
-            hw = self._scroll_host.winfo_width()
-            hh = self._scroll_host.winfo_height()
-            cx = self.canvas.winfo_rootx()
-            cy = self.canvas.winfo_rooty()
+            root.config(cursor="")
+        except tk.TclError:
+            pass
+        self._destroy_qdm_ghost()
+
+    def _canvas_xy_from_root(self, x_root, y_root, *, require_inside=True):
+        """Pointer → the inner grid's own coordinates.
+
+        The grid canvas sits inside `_scroll_host` and never scrolls
+        itself (see the comment on `_scroll_host`). Host canvasx/canvasy
+        is the reliable conversion once that host has been panned;
+        winfo_rootx of the nested canvas can report the clipped viewport
+        origin instead of the widget's real origin.
+
+        `require_inside=False` still converts when the pointer is over
+        the sidebar so the drag card can slide onto the grid.
+        """
+        try:
+            host = self._scroll_host
+            hx = host.winfo_rootx()
+            hy = host.winfo_rooty()
+            hw = host.winfo_width()
+            hh = host.winfo_height()
         except (tk.TclError, AttributeError):
             return None
-        if not (hx <= x_root <= hx + hw and hy <= y_root <= hy + hh):
+        if require_inside and not (hx <= x_root <= hx + hw and hy <= y_root <= hy + hh):
             return None
-        return x_root - cx, y_root - cy
+        try:
+            return host.canvasx(x_root - hx), host.canvasy(y_root - hy)
+        except tk.TclError:
+            return x_root - hx, y_root - hy
 
     def _on_qdm_drop_motion(self, event):
         state = self._drag_state
         if not state or state.get("mode") != "qdm-drop":
             return
+        self._place_qdm_ghost(event.x_root, event.y_root)
         pos = self._canvas_xy_from_root(event.x_root, event.y_root)
         if pos is None:
-            if state["preview_rect"] is not None:
-                self.canvas.delete(state["preview_rect"])
-                state["preview_rect"] = None
+            self._clear_qdm_slot_preview(state)
+            self._raise_qdm_ghost()
             return
         self._update_qdm_drop_preview(pos[0], pos[1], state)
+        self._raise_qdm_ghost()
+
+    def _discard_preview_items(self, state):
+        ids = list(state.get("_aa_ids") or [])
+        if state.get("preview_rect") is not None and state["preview_rect"] not in ids:
+            ids.append(state["preview_rect"])
+        for item in ids:
+            try:
+                self.canvas.delete(item)
+            except tk.TclError:
+                pass
+        state["preview_rect"] = None
+        state["_aa_ids"] = None
+        state["_aa_geom"] = None
+
+    def _clear_qdm_slot_preview(self, state):
+        self._discard_preview_items(state)
+        state["preview_day_idx"] = None
+        state["preview_start"] = None
+        state["preview_end"] = None
 
     def _update_qdm_drop_preview(self, x, y, state):
+        """30-minute slot on whichever day the pointer is over right now."""
         day_idx = self._day_idx_for_x(x)
         if day_idx is None or y < self.header_height:
-            if state["preview_rect"] is not None:
-                self.canvas.delete(state["preview_rect"])
-                state["preview_rect"] = None
+            self._clear_qdm_slot_preview(state)
             return
-        minute = self._snapped_minute_for_y(y)
-        if state["anchor_minute"] is None:
-            state["anchor_day_idx"] = day_idx
-            state["anchor_minute"] = minute
-            state["grid_anchor_y"] = y
-            state["cur_minute"] = minute
-        else:
-            if abs(y - (state["grid_anchor_y"] or y)) > config.DRAG_THRESHOLD_PX:
-                state["moved_on_grid"] = True
-            if state["moved_on_grid"]:
-                state["cur_minute"] = minute
-
-        day_idx = state["anchor_day_idx"]
-        start_min = state["anchor_minute"]
-        if state["moved_on_grid"]:
-            start_min = min(state["anchor_minute"], state["cur_minute"])
-            end_min = max(state["anchor_minute"], state["cur_minute"])
-            if end_min == start_min:
-                end_min = min(_minutes_total(), start_min + config.SLOT_MINUTES)
-        else:
-            end_min = min(_minutes_total(), start_min + config.QDM_DROP_MINUTES)
+        start_min = self._snapped_minute_for_y(y)
+        end_min = min(_minutes_total(), start_min + config.QDM_DROP_MINUTES)
+        if end_min <= start_min:
+            start_min = max(0, _minutes_total() - config.QDM_DROP_MINUTES)
+            end_min = _minutes_total()
             if end_min <= start_min:
                 return
 
@@ -1743,10 +1971,17 @@ class CalendarGrid(tk.Frame):
         x1 = x0 + self.day_width - 6
         y0 = self.header_height + start_min * self.px_per_min
         y1 = self.header_height + end_min * self.px_per_min
-        act = state["activity"]
-        self._set_live_block(
-            state, "preview_rect", x0, y0, x1, y1,
-            fill=act.color, outline=theme.PANEL_BG, width=2)
+        fill = theme.block_fill(state["activity"].color)
+        geom = (round(x0), round(y0), round(x1), round(y1), fill)
+        if state.get("_aa_geom") != geom:
+            self._discard_preview_items(state)
+            ids = theme.place_rounded_rect(
+                self.canvas, x0, y0, x1, y1, radius=config.BLOCK_CORNER_RADIUS,
+                fill=fill, outline="", background=self._day_column_bg(day_idx), full=True,
+                transparent_outside=True)
+            state["_aa_ids"] = ids
+            state["preview_rect"] = ids[-1]
+            state["_aa_geom"] = geom
         state["preview_start"] = start_min
         state["preview_end"] = end_min
         state["preview_day_idx"] = day_idx
@@ -1757,11 +1992,7 @@ class CalendarGrid(tk.Frame):
         if not state or state.get("mode") != "qdm-drop":
             return
         self._drag_state = None
-        if state.get("preview_rect") is not None:
-            try:
-                self.canvas.delete(state["preview_rect"])
-            except tk.TclError:
-                pass
+        self._discard_preview_items(state)
         try:
             self.canvas.config(cursor="")
         except tk.TclError:
@@ -1779,9 +2010,9 @@ class CalendarGrid(tk.Frame):
             end_min = min(_minutes_total(), start_min + config.QDM_DROP_MINUTES)
         if end_min <= start_min:
             return
-        # Duration is already chosen on the grid. Jira worklogs need a
-        # comment, so open the Time Block tab on Notes instead of saving
-        # an empty description. Cancel leaves no block.
+        # Always a 30-minute starting block from a sidebar drop. Jira
+        # worklogs need a comment, so open Time Block on Description —
+        # start/end can be changed there. Cancel leaves no block.
         self._open_entry_dialog(
             new=True, day_idx=day_idx,
             start_hhmm=_minute_to_hhmm(start_min),
@@ -1836,8 +2067,8 @@ class CalendarGrid(tk.Frame):
         # sidebar, and deselect a keyboard-selected block -- all three are
         # harmless no-ops when they don't apply, and self.refresh() below
         # repaints whichever of them actually did something.
-        if self._drag_state and self._drag_state.get("preview_rect") is not None:
-            self.canvas.delete(self._drag_state["preview_rect"])
+        if self._drag_state:
+            self._discard_preview_items(self._drag_state)
         self._unbind_qdm_drop()
         self._drag_state = None
         self.clear_armed_activity()
@@ -1900,8 +2131,10 @@ class CalendarGrid(tk.Frame):
         x1 = x0 + self.day_width - 8
         y0 = self.header_height + slot * self.px_per_min + 1
         y1 = y0 + self.slot_height - 2
-        self.canvas.create_rectangle(
-            x0, y0, x1, y1, fill=theme.ACCENT_SOFT, outline="", tags="hover_preview")
+        theme.place_rounded_rect(
+            self.canvas, x0, y0, x1, y1, radius=min(8, (x1 - x0) / 2, (y1 - y0) / 2),
+            fill=theme.ACCENT_SOFT, outline="", background=self._day_column_bg(day),
+            tags="hover_preview", full=True, transparent_outside=True)
         if self.canvas.find_withtag("entry"):
             self.canvas.tag_lower("hover_preview", "entry")
         elif self.canvas.find_withtag("today_col"):

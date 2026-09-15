@@ -16,6 +16,7 @@ look instead of only the calendar blocks (see calendar_view._draw_entry)
 looking modern while buttons and panels stayed sharp-cornered.
 """
 import os
+import math
 import tkinter as tk
 import tkinter.font as tkfont
 from typing import Callable, List, Optional
@@ -29,6 +30,19 @@ from . import theme
 # needing a separate smaller constant.
 BUTTON_RADIUS = 12
 CARD_RADIUS = 14
+_BUTTON_ICON_SIZE = 14
+_BUTTON_ICON_GAP = 6
+
+
+def _jira_tile_points(x0: float, y0: float, m: float):
+    """Square with a quarter-circle bitten from the SW corner (Jira tile)."""
+    br = m * 0.62
+    pts = [x0, y0, x0 + m, y0, x0 + m, y0 + m, x0 + br, y0 + m]
+    for i in range(9):
+        a = math.radians(0.0 + 90.0 * i / 8.0)
+        pts.extend((x0 + br * math.cos(a), y0 + m - br * math.sin(a)))
+    pts.extend((x0, y0 + m - br, x0, y0))
+    return pts
 
 # See sidebar.py's original copy of this flag (now here) -- set
 # FREE_TIMESHEET_DEBUG_WHEEL=1 in the environment to print every wheel-ish
@@ -91,7 +105,7 @@ def _parent_bg(widget) -> str:
     return bg
 
 
-def _hex_bg_at(root, abs_x: int, abs_y: int, fallback: str) -> str:
+def _hex_bg_at(root, abs_x: int, abs_y: int, fallback: str, ignore=None) -> str:
     """Hex background of the topmost widget under a screen coordinate.
 
     Floating menus are parented to the toplevel so they can hang off their
@@ -99,11 +113,22 @@ def _hex_bg_at(root, abs_x: int, abs_y: int, fallback: str) -> str:
     almost never the color actually sitting behind the menu. Walk
     `winfo_containing` instead so rounded-card corners blend into the
     timer bar, calendar, sidebar, or whatever else the popup covers.
+
+    `ignore` is a widget to see through (the floating card itself). Tk
+    cannot hit-test underneath it, so those samples fall back rather than
+    blending the cut-off corners into the card's own fill.
     """
     try:
         widget = root.winfo_containing(int(abs_x), int(abs_y))
     except tk.TclError:
         widget = None
+    if ignore is not None:
+        w = widget
+        while w is not None:
+            if w is ignore:
+                widget = None
+                break
+            w = getattr(w, "master", None)
     while widget is not None:
         try:
             own = widget.cget("bg")
@@ -146,6 +171,8 @@ _BUTTON_STYLES = {
     # theme.py's THEMES dict for where SURFACE is defined per theme.
     "Accent.TButton": dict(bg="ACCENT", hover="ACCENT_HOVER", press="ACCENT_HOVER", fg="#FFFFFF",
                             bold=True, pad=(14, 8), border=None),
+    "Ghost.TButton": dict(bg="APP_BG", hover="SURFACE", press="BORDER", fg="TEXT_PRIMARY",
+                           bold=False, pad=(12, 8), border="BORDER_STRONG"),
     "Secondary.TButton": dict(bg="SURFACE", hover="BORDER", press="BORDER_STRONG", fg="TEXT_PRIMARY",
                                bold=False, pad=(10, 6), border=None),
     "Danger.TButton": dict(bg="DANGER_SOFT", hover="DANGER_SOFT_ACTIVE", press="DANGER_SOFT_ACTIVE",
@@ -153,6 +180,66 @@ _BUTTON_STYLES = {
     "Nav.TButton": dict(bg="SURFACE", hover="BORDER", press="BORDER_STRONG", fg="TEXT_PRIMARY",
                          bold=False, pad=(8, 5), border=None),
 }
+
+
+def draw_button_icon(canvas, kind: str, cx: float, cy: float, size: float, fill: str,
+                     background: str = ""):
+    """Tiny document / Jira / play marks for header CTAs.
+
+    Canvas primitives rather than a symbol font or a PNG, same reasoning
+    as theme.draw_logo_mark: they have to render on every Tk we ship.
+    """
+    kind = (kind or "").lower().strip()
+    if kind == "csv":
+        w, h = size * 0.70, size * 0.92
+        x0, y0 = cx - w / 2, cy - h / 2
+        x1, y1 = cx + w / 2, cy + h / 2
+        fold = size * 0.28
+        canvas.create_line(
+            x0, y0 + 1, x1 - fold, y0 + 1, x1 - 0.5, y0 + fold,
+            x1 - 0.5, y1 - 1, x0, y1 - 1, x0, y0 + 1,
+            fill=fill, width=1.5, capstyle="round", joinstyle="round")
+        canvas.create_line(
+            x1 - fold, y0 + 1, x1 - fold, y0 + fold, x1 - 0.5, y0 + fold,
+            fill=fill, width=1.5, capstyle="round", joinstyle="round")
+        for i in range(3):
+            yy = y0 + fold + 2.5 + i * 3.0
+            if yy < y1 - 2.5:
+                canvas.create_line(
+                    x0 + 2.5, yy, x1 - 2.5, yy,
+                    fill=fill, width=1.2, capstyle="round")
+        return
+    if kind == "play":
+        s = size * 0.42
+        canvas.create_polygon(
+            cx - s * 0.50, cy - s * 0.85,
+            cx - s * 0.50, cy + s * 0.85,
+            cx + s * 0.90, cy,
+            fill=fill, outline="", joinstyle="round")
+        return
+    if kind == "stop":
+        s = size * 0.32
+        canvas.create_rectangle(cx - s, cy - s, cx + s, cy + s, fill=fill, outline="")
+        return
+    if kind in ("jira", "atlassian"):
+        # Official Jira mark: three hooked tiles cascading up-right.
+        # Each tile is a square with a quarter-circle cut from the inner
+        # corner, drawn as one polygon so later tiles don't punch holes
+        # through earlier ones (that was the three black dots).
+        color = "#2684FF"
+        m = size * 0.58
+        step = size * 0.30
+        x_mid = cx - m / 2.0
+        y_mid = cy - m / 2.0
+        for x0, y0 in (
+            (x_mid - step, y_mid + step),
+            (x_mid, y_mid),
+            (x_mid + step, y_mid - step),
+        ):
+            canvas.create_polygon(
+                *_jira_tile_points(x0, y0, m),
+                fill=color, outline="", joinstyle="round", smooth=False)
+        return
 
 
 class RoundedButton(tk.Canvas):
@@ -170,7 +257,7 @@ class RoundedButton(tk.Canvas):
 
     def __init__(self, master, text: str = "", command: Optional[Callable[[], None]] = None,
                  style: str = "Secondary.TButton", width: Optional[int] = None,
-                 shadow: bool = False, compact: bool = False, **kwargs):
+                 shadow: bool = False, compact: bool = False, icon: Optional[str] = None, **kwargs):
         bg = kwargs.pop("bg", None) or _parent_bg(master)
         kwargs.setdefault("highlightthickness", 0)
         kwargs.setdefault("cursor", "hand2")
@@ -181,14 +268,9 @@ class RoundedButton(tk.Canvas):
         self._char_width = width
         self._hover = False
         self._pressed = False
-        # Opt-in only (currently just the calendar's nav row) -- a subtle
-        # offset duplicate of the button's own shape, darkened and drawn
-        # first so it peeks out bottom-right, is a "flat" hand-drawn
-        # canvas's best approximation of a real (blurred, alpha-blended)
-        # drop shadow. Not the default for every button in the app; this
-        # is a deliberately small, opt-in visual accent.
         self._shadow = shadow
         self._compact = compact
+        self._icon = icon
 
         self.bind("<Configure>", lambda e: self._redraw())
         self.bind("<Enter>", self._on_enter)
@@ -219,6 +301,9 @@ class RoundedButton(tk.Canvas):
             resize = True
         if "style" in kwargs:
             self._style = kwargs.pop("style")
+            resize = True
+        if "icon" in kwargs:
+            self._icon = kwargs.pop("icon")
             resize = True
         if "command" in kwargs:
             self._command = kwargs.pop("command")
@@ -251,6 +336,7 @@ class RoundedButton(tk.Canvas):
         if self._char_width:
             text_w = max(text_w, self._char_width * f.measure("0"))
         height = f.metrics("linespace") + 2 * pad_y
+        glow = self._glow_pad()
         if self._compact:
             # Square hit target drawn as a circle — the old width=3 +
             # drop-shadow left a rectangular canvas peeking around +/−.
@@ -258,9 +344,21 @@ class RoundedButton(tk.Canvas):
             super().configure(width=side, height=side)
             self._redraw()
             return
-        width = max(text_w + 2 * pad_x, 2 * pad_x + 4)
-        super().configure(width=int(width), height=int(height))
+        width = max(text_w + 2 * pad_x + self._icon_span(), 2 * pad_x + 4)
+        super().configure(width=int(width) + 2 * glow, height=int(height) + 2 * glow)
         self._redraw()
+
+    def _icon_span(self) -> int:
+        if not self._icon:
+            return 0
+        return _BUTTON_ICON_SIZE + _BUTTON_ICON_GAP
+
+    def _glow_pad(self) -> int:
+        if self._compact or self._style != "Accent.TButton":
+            return 0
+        if not getattr(theme, "accent_is_luminous", lambda: False)():
+            return 0
+        return int(getattr(theme, "ACCENT_GLOW_PAD", 6))
 
     # -- drawing ----------------------------------------------------------
     def _redraw(self):
@@ -282,12 +380,24 @@ class RoundedButton(tk.Canvas):
             outline = _color(spec["border"]) if spec["border"] else ""
         fg = _color(spec["fg"])
         radius = min(w, h) / 2.0 if self._compact else BUTTON_RADIUS
-        # Coverage-antialiased PhotoImage instead of create_polygon -- Tk
-        # polygon fills are not antialiased, which is the stair-stepped
-        # corner on Retina. Theme colors (fill/hover/outline) are unchanged;
-        # only the pixels along the curve are blended into the parent.
+        luminous = (self._style == "Accent.TButton" and not self._compact
+                    and getattr(theme, "accent_is_luminous", lambda: False)())
+        fill_end = ""
+        if luminous:
+            end = theme.ACCENT_B
+            fill_end = theme._darken(end, 0.08) if (self._hover or self._pressed) else end
+        glow_pad = self._glow_pad()
         try:
-            if self._shadow and not self._compact:
+            if glow_pad:
+                inner_w = max(1, w - 2 * glow_pad)
+                inner_h = max(1, h - 2 * glow_pad)
+                pill_r = min(inner_w, inner_h) / 2.0
+                self._photo = theme.rounded_rect_image(
+                    w, h, pill_r, fill, parent_bg,
+                    outline=outline, outline_width=1 if outline else 0,
+                    fill_end=fill_end, glow=glow_pad)
+                self.create_image(0, 0, image=self._photo, anchor="nw")
+            elif self._shadow and not self._compact:
                 off = 2
                 inner_w = max(1, w - off)
                 inner_h = max(1, h - off)
@@ -298,19 +408,29 @@ class RoundedButton(tk.Canvas):
                 self.create_image(off, off, image=self._shadow_photo, anchor="nw")
                 self._photo = theme.rounded_rect_image(
                     inner_w, inner_h, radius, fill, parent_bg,
-                    outline=outline, outline_width=1 if outline else 0)
+                    outline=outline, outline_width=1 if outline else 0,
+                    fill_end=fill_end)
                 self.create_image(0, 0, image=self._photo, anchor="nw")
             else:
                 self._photo = theme.rounded_rect_image(
                     w, h, radius, fill, parent_bg,
-                    outline=outline, outline_width=1 if outline else 0)
+                    outline=outline, outline_width=1 if outline else 0,
+                    fill_end=fill_end)
                 self.create_image(0, 0, image=self._photo, anchor="nw")
         except tk.TclError:
             theme.rounded_rect(
                 self, 0.5, 0.5, w - 0.5, h - 0.5, radius=radius,
                 fill=fill, outline=outline, width=1 if outline else 0)
         f = self._font()
-        self.create_text(w / 2, h / 2, text=self._text, fill=fg, font=f, anchor="center")
+        icon_span = self._icon_span()
+        text_x = w / 2.0 + icon_span / 2.0
+        if self._icon:
+            text_w = f.measure(self._text)
+            icon_cx = text_x - text_w / 2.0 - _BUTTON_ICON_GAP - _BUTTON_ICON_SIZE / 2.0
+            draw_button_icon(
+                self, self._icon, icon_cx, h / 2.0, _BUTTON_ICON_SIZE, fg,
+                background=parent_bg)
+        self.create_text(text_x, h / 2, text=self._text, fill=fg, font=f, anchor="center")
 
     # -- interaction ------------------------------------------------------
     def _on_enter(self, _event=None):
@@ -1031,6 +1151,9 @@ class RoundedCard(tk.Frame):
         if outer_bg is None:
             outer_bg = _parent_bg(master)
         kwargs.setdefault("bg", outer_bg)
+        kwargs.setdefault("highlightthickness", 0)
+        kwargs.setdefault("bd", 0)
+        kwargs.setdefault("relief", "flat")
         super().__init__(master, **kwargs)
         self._radius = radius
         self._outline = outline
@@ -1081,6 +1204,43 @@ class RoundedCard(tk.Frame):
         self._shape_ids = new_ids
         self._drawn_size = size
 
+    def set_fill(self, bg: str):
+        """Repaint this card's fill (sidebar row hover)."""
+        if (bg or "").upper() == (self._bg or "").upper():
+            return
+        self._bg = bg
+        try:
+            self.body.configure(bg=bg)
+        except tk.TclError:
+            pass
+        self._drawn_size = None
+        self._redraw()
+
+    def set_corner_backgrounds(self, corner_bgs: Optional[dict]):
+        """Repaint the cut-off corners against whatever is behind this card.
+
+        The widget is still a square Frame; the rounded fill only covers
+        the middle. Without this, those four leftover triangles keep the
+        parent/window color and read as a box around the card.
+        """
+        corner_bgs = corner_bgs or {}
+        key = (
+            corner_bgs.get("nw"), corner_bgs.get("ne"),
+            corner_bgs.get("sw"), corner_bgs.get("se"),
+        )
+        if key == getattr(self, "_corner_key", None) and self._shape_ids:
+            return
+        self._corner_key = key
+        self._corner_bgs = corner_bgs
+        self._drawn_size = None
+        outer = corner_bgs.get("nw") or theme.APP_BG
+        try:
+            self.configure(bg=outer)
+            self._canvas.configure(bg=outer)
+        except tk.TclError:
+            pass
+        self._redraw()
+
 
 class ScrollArea(RoundedCard):
     """A RoundedCard whose interior scrolls vertically -- the one thing to
@@ -1107,10 +1267,12 @@ class ScrollArea(RoundedCard):
     """
 
     def __init__(self, master, bg: Optional[str] = None, radius: int = CARD_RADIUS,
-                 outline: bool = True, pad: Optional[int] = None, **kwargs):
+                 outline: bool = True, pad: Optional[int] = None,
+                 autohide_scrollbar: bool = False, **kwargs):
         kwargs.pop("shrink", None)
         super().__init__(master, bg=bg, radius=radius, outline=outline, pad=pad, **kwargs)
         bgc = self._bg
+        self._autohide_scrollbar = autohide_scrollbar
 
         self.canvas = tk.Canvas(self.body, bg=bgc, highlightthickness=0)
         self.scrollbar = VectorScrollbar(self.body, command=self.canvas.yview, bg=bgc)
@@ -1130,7 +1292,10 @@ class ScrollArea(RoundedCard):
         # Scrollbar packed first: an expand=True widget packed first claims
         # the whole container, leaving a later-packed scrollbar nothing to
         # show in (see sidebar.py's original note on this same gotcha).
-        self.scrollbar.pack(side="right", fill="y")
+        # Pie legends pass autohide_scrollbar so a 4-row key doesn't keep
+        # a dead track between the names and the hours.
+        if not autohide_scrollbar:
+            self.scrollbar.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
 
         # Mouse wheel scrolling is wired up TWO independent ways, since a
@@ -1194,6 +1359,34 @@ class ScrollArea(RoundedCard):
         to reflect the new size sooner than the next natural <Configure>."""
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
         self.bind_wheel_recursive(self.content)
+        try:
+            self.update_idletasks()
+        except tk.TclError:
+            pass
+        self._sync_scrollbar()
+
+    def _sync_scrollbar(self):
+        if not self._autohide_scrollbar:
+            return
+        try:
+            bbox = self.canvas.bbox("all")
+            content_h = (bbox[3] - bbox[1]) if bbox else 0
+            view_h = int(self.canvas.winfo_height())
+        except tk.TclError:
+            return
+        overflow = content_h > view_h + 1 and view_h > 1
+        try:
+            mapped = bool(self.scrollbar.winfo_ismapped())
+        except tk.TclError:
+            return
+        if overflow and not mapped:
+            self.scrollbar.pack(side="right", fill="y", before=self.canvas)
+        elif not overflow and mapped:
+            self.scrollbar.pack_forget()
+            try:
+                self.canvas.yview_moveto(0)
+            except tk.TclError:
+                pass
 
     def _on_content_configure(self, _event=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -1204,6 +1397,7 @@ class ScrollArea(RoundedCard):
         # remember to do it themselves. bind_wheel_recursive tracks what's
         # already bound, so this is cheap on repeat calls.
         self.bind_wheel_recursive(self.content)
+        self._sync_scrollbar()
 
     def bind_wheel_recursive(self, widget):
         """Attach the direct (non-hit-tested) wheel handler to `widget` and
