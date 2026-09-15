@@ -23,7 +23,7 @@ from .summary_panel import SummaryPanel
 from .timeblock_panel import TimeBlockPanel
 from .timer_bar import TimerBar
 from .version import APP_VERSION
-from .widgets import RoundedButton, RoundedCombobox, RoundedEntry
+from .widgets import RoundedButton, RoundedCombobox, RoundedEntry, segmented_button_style
 
 
 class MainWindow(tk.Tk):
@@ -423,8 +423,8 @@ class MainWindow(tk.Tk):
 
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="Sync QDMs from Jira…", command=self._sync_qdms_from_jira)
-        file_menu.add_command(label="Push hours to Jira…", command=self._open_export_dialog)
-        file_menu.add_command(label="Export to Jira CSV…", command=self._open_export_dialog)
+        file_menu.add_command(label="Push this week to Jira…", command=self._push_visible_week)
+        file_menu.add_command(label="Export CSV…", command=self._open_export_dialog)
         file_menu.add_separator()
         file_menu.add_command(label="New QDM…", command=self._add_qdm)
         file_menu.add_command(label="New Project…", command=self._add_project)
@@ -718,15 +718,16 @@ class MainWindow(tk.Tk):
         # and calls .select() on click, refreshed by _refresh_tab_bar()
         # (called from _on_tab_changed, so it stays in sync with every
         # notebook.select()/tab(state=...) call anywhere in this file).
-        # tab_row holds the hand-drawn tab strip on the left and Export
-        # CSV / Push to Jira on the right -- those used to live in the
-        # header (see _build_top_bar), but now always sit here instead,
-        # regardless of which Heading size is chosen (including "hidden",
-        # which has no header row left to hold them at all). self.tab_bar
-        # itself holds only the tab buttons: _refresh_tab_bar() below
-        # destroys and rebuilds *its* children on every tab change, so
-        # the CTAs live in this separate sibling frame instead of inside
-        # tab_bar, where that rebuild would otherwise destroy them too.
+        # tab_row holds the hand-drawn tab strip on the left and Push to
+        # Jira on the right -- that used to live in the header (see
+        # _build_top_bar), but now always sits here instead, regardless
+        # of which Heading size is chosen (including "hidden", which has
+        # no header row left to hold it at all). CSV export is under File
+        # so this row stays a single Jira action. self.tab_bar itself
+        # holds only the tab buttons: _refresh_tab_bar() below destroys
+        # and rebuilds *its* children on every tab change, so the CTA
+        # lives in this separate sibling frame instead of inside tab_bar,
+        # where that rebuild would otherwise destroy it too.
         self._body_gen = getattr(self, "_body_gen", 0) + 1
         self._secondary_built = False
         self._secondary_step = 0
@@ -748,12 +749,10 @@ class MainWindow(tk.Tk):
         # crowded against the Timer section and lopsided against the card.
         tab_row.pack(fill="x", padx=16, pady=(10, 10))
 
-        # pack() side=right stacks inward, so Push is packed first to stay
-        # on the far right, with Export CSV immediately to its left.
-        RoundedButton(tab_row, text="Push to Jira", style="Ghost.TButton",
-                      icon="jira", command=self._open_export_dialog).pack(side="right")
-        RoundedButton(tab_row, text="Export CSV", style="Ghost.TButton",
-                      icon="csv", command=self._open_export_dialog).pack(side="right", padx=(0, 8))
+        self.push_btn = RoundedButton(
+            tab_row, text="Synced", style="Ghost.TButton",
+            icon="jira", command=self._push_visible_week)
+        self.push_btn.pack(side="right")
 
         self.tab_bar = tk.Frame(tab_row, bg=theme.APP_BG)
         self.tab_bar.pack(side="left", fill="x", expand=True)
@@ -807,7 +806,17 @@ class MainWindow(tk.Tk):
             initial_week_start=initial_week_start,
             on_week_change=self._pull_worklogs_for_week,
         )
+        orig_refresh = self.calendar.refresh
+
+        def _refresh_then_push(*args, **kwargs):
+            try:
+                return orig_refresh(*args, **kwargs)
+            finally:
+                self._refresh_push_button()
+
+        self.calendar.refresh = _refresh_then_push
         self._place_sidebar_and_calendar(body, self.sidebar, self.calendar)
+        self._refresh_push_button()
         self.sidebar.set_calendar(self.calendar)
         # Template / Summary / Settings / dialogs are built after the
         # Timesheet can take clicks. Building them here used to map a
@@ -1116,9 +1125,8 @@ class MainWindow(tk.Tk):
         self._all_tabs + the notebook's own current state -- one button
         per tab currently in "normal" state (every permanent tab, plus
         whichever single transient panel _show_panel most recently made
-        visible, if any), styled Accent for whichever one is selected and
-        Secondary for the rest -- the exact same selected/unselected style
-        convention SummaryPanel already uses for its Week/Month toggle."""
+        visible, if any). The selected tab is a Ghost chip (same family
+        as Today / Synced); the rest are Quiet labels, not extra plates."""
         try:
             selected = self.notebook.select()
         except tk.TclError:
@@ -1135,7 +1143,7 @@ class MainWindow(tk.Tk):
             is_selected = selected is not None and selected == str(widget)
             RoundedButton(
                 self.tab_bar, text=tab_text,
-                style="Accent.TButton" if is_selected else "Secondary.TButton",
+                style=segmented_button_style(is_selected),
                 command=lambda w=widget: self.notebook.select(w),
             ).pack(side="left", padx=(0, 6))
 
@@ -1399,6 +1407,32 @@ class MainWindow(tk.Tk):
         restored_theme_id = self.db.get_setting("theme_mode", theme.DEFAULT_THEME_ID) or theme.DEFAULT_THEME_ID
         self._apply_theme_and_rebuild(restored_theme_id)
         messagebox.showinfo("Restore Complete", "Your data has been restored.")
+
+    def _visible_week_range(self) -> tuple:
+        start = self.calendar.week_start
+        end = start + timedelta(days=config.week_end_offset())
+        return start.isoformat(), end.isoformat()
+
+    def _refresh_push_button(self):
+        btn = getattr(self, "push_btn", None)
+        calendar = getattr(self, "calendar", None)
+        if btn is None or calendar is None:
+            return
+        try:
+            start, end = self._visible_week_range()
+            text, style = jira_sync.push_button_state(
+                self.db.list_time_entries_between(start, end),
+                self.db.list_pending_worklog_deletes(start, end),
+            )
+            btn.config(text=text, style=style)
+        except tk.TclError:
+            pass
+
+    def _push_visible_week(self):
+        if not hasattr(self, "calendar"):
+            return
+        start, end = self._visible_week_range()
+        self._push_hours_to_jira(start, end)
 
     def _open_export_dialog(self):
         self._ensure_secondary_tabs(now=True)

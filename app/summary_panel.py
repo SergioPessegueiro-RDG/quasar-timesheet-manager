@@ -41,7 +41,7 @@ from datetime import date, timedelta
 
 from . import config, theme
 from .db import Database
-from .widgets import CARD_RADIUS, RoundedButton, RoundedCard, ScrollArea
+from .widgets import CARD_RADIUS, RoundedButton, RoundedCard, ScrollArea, segmented_button_style
 
 
 # On-slice labels: a thin wedge is too narrow for a wrapped project name
@@ -140,10 +140,9 @@ class SummaryPanel(tk.Frame):
                                       bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY)
         self.period_label.pack(side="left", padx=16)
 
-        # A two-button segmented toggle (the active one drawn in the accent
-        # style, same convention as the color swatches and theme swatches
-        # elsewhere) rather than a Combobox -- there are only ever two
-        # choices, so a toggle reads faster than a dropdown.
+        # A two-button segmented toggle. The active one is a Ghost chip,
+        # same pairing as the Timesheet tab strip -- not a solid accent
+        # fill, which made a view switch look like a primary action.
         toggle_box = tk.Frame(nav, bg=theme.PANEL_BG)
         toggle_box.pack(side="right")
         self.week_btn = RoundedButton(toggle_box, text="Week", command=lambda: self._set_mode("week"))
@@ -313,8 +312,8 @@ class SummaryPanel(tk.Frame):
     def refresh(self):
         start, end = self._period_range()
         self.period_label.config(text=self._period_label_text(start, end))
-        self.week_btn.config(style="Accent.TButton" if self.mode == "week" else "Secondary.TButton")
-        self.month_btn.config(style="Accent.TButton" if self.mode == "month" else "Secondary.TButton")
+        self.week_btn.config(style=segmented_button_style(self.mode == "week"))
+        self.month_btn.config(style=segmented_button_style(self.mode == "month"))
 
         entries = self.db.list_time_entries_between(start.isoformat(), end.isoformat())
 

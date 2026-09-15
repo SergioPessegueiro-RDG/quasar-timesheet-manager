@@ -295,6 +295,11 @@ class TestRoundedWidgets(unittest.TestCase):
                 self.assertGreater(int(jira_btn.cget("width")), 40)
                 play = RoundedButton(root, text="Start Timer", style="Accent.TButton", icon="play")
                 self.assertEqual(play._icon, "play")
+                quiet = RoundedButton(root, text="Template", style="Quiet.TButton")
+                self.assertEqual(quiet.cget("style"), "Quiet.TButton")
+                from app.widgets import segmented_button_style
+                self.assertEqual(segmented_button_style(True), "Ghost.TButton")
+                self.assertEqual(segmented_button_style(False), "Quiet.TButton")
             finally:
                 theme.set_theme(previous)
 

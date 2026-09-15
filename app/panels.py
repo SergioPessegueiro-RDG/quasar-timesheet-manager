@@ -25,7 +25,7 @@ from .models import Activity, Project, TemplateEntry, TimeEntry
 from .version import APP_VERSION
 from .widgets import (
     RoundedButton, RoundedCard, RoundedCheckbutton, RoundedCombobox, RoundedEntry,
-    ScrollArea, show_saved_toast,
+    ScrollArea, segmented_button_style, show_saved_toast,
 )
 
 EntryLike = Union[TimeEntry, TemplateEntry]
@@ -855,12 +855,11 @@ class SettingsPanel(tk.Frame):
 
     def _select_header_style(self, key: str):
         """Click handler for the Standard/Compact/Hidden segmented row --
-        same selected/unselected style convention as the tab bar and
-        SummaryPanel's Week/Month toggle (Accent for the chosen one,
-        Secondary for the rest)."""
+        Ghost chip for the chosen size, Quiet labels for the rest (same
+        pairing as the tab bar and Summary's Week/Month toggle)."""
         self.header_style_choice = key
         for btn_key, btn in self.header_style_buttons.items():
-            btn.config(style="Accent.TButton" if btn_key == key else "Secondary.TButton")
+            btn.config(style=segmented_button_style(btn_key == key))
 
     def _reflow_settings_columns(self, event=None):
         """Bound to outer's <Configure> (plus one after_idle call so a

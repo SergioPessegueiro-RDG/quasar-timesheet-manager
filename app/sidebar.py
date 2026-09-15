@@ -176,7 +176,7 @@ class Sidebar(tk.Frame):
                 RoundedButton(header, text="«", width=3, style="Nav.TButton", compact=True,
                               command=self.on_toggle_collapse).pack(side="right")
             if self.on_jira_sync is not None:
-                RoundedButton(header, text="Sync", style="Accent.TButton",
+                RoundedButton(header, text="Sync", style="Ghost.TButton",
                               command=self.on_jira_sync).pack(side="right", padx=(0, 6))
 
             search_row = tk.Frame(inner, bg=theme.PANEL_BG)

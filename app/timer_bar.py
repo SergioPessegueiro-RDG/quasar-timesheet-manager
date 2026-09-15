@@ -48,8 +48,11 @@ class TimerBar(tk.Frame):
         inner.pack(fill="x")
 
         self.activity_var = tk.StringVar()
+        # Closed width hugs the empty prompt. The open list still grows to
+        # the longest QDM name; a long selection ellipsizes in the field
+        # instead of stretching the header and shoving Start Timer.
         self.activity_combo = RoundedCombobox(inner, textvariable=self.activity_var,
-                                               state="readonly", width=22, bg=bg,
+                                               state="readonly", width=6, bg=bg,
                                                filterable=True)
         self.activity_combo.pack(side="left", padx=(0, 8))
 
@@ -99,13 +102,13 @@ class TimerBar(tk.Frame):
         # inert/disabled control instead of one that needs a click. Only
         # set when nothing has been picked yet (activity_var starts as ""
         # and this only runs once as a result); a real selection is never
-        # overwritten, including across later refreshes. "Select QDM"
-        # itself is never a real activity name, so _selected_activity()
-        # below correctly treats it the same as the old blank state --
-        # _start()'s existing "Choose an activity" guard already covers
-        # trying to start the timer without a real one picked.
+        # overwritten, including across later refreshes. "QDM" itself is
+        # never a real activity name, so _selected_activity() below
+        # correctly treats it the same as the old blank state -- _start()'s
+        # existing "Choose an activity" guard already covers trying to
+        # start the timer without a real one picked.
         if not self.activity_var.get():
-            self.activity_var.set("Select QDM")
+            self.activity_var.set("QDM")
 
     def _selected_activity(self) -> Optional[Activity]:
         return self._activities_by_name.get(self.activity_var.get())

@@ -352,6 +352,39 @@ def plan_worklog_push(
     return plan
 
 
+def unsent_worklog_totals(
+    entries: List[TimeEntry],
+    pending_deletes: Optional[List[PendingWorklogDelete]] = None,
+) -> tuple:
+    """How many local changes would actually hit Jira, and their minutes.
+
+    Pending deletes count toward the item total (they still need a push)
+    but add no minutes — those hours are already gone locally.
+    """
+    plan = plan_worklog_push(entries, pending_deletes)
+    items = plan.create + plan.update + plan.move + plan.remove_key
+    minutes = sum(max(0, entry.duration_minutes()) for entry in items)
+    return len(items) + len(plan.pending_deletes), minutes
+
+
+def push_button_state(
+    entries: List[TimeEntry],
+    pending_deletes: Optional[List[PendingWorklogDelete]] = None,
+) -> tuple:
+    """Label + button style for the week Push control.
+
+    Quiet "Synced" until something local still needs sending; then an
+    accent "Push Nh" (or plain "Push to Jira" if the only outstanding
+    work is a delete with no remaining minutes).
+    """
+    count, minutes = unsent_worklog_totals(entries, pending_deletes)
+    if count == 0:
+        return "Synced", "Ghost.TButton"
+    if minutes > 0:
+        return f"Push {minutes / 60:.1f}h", "Accent.TButton"
+    return "Push to Jira", "Accent.TButton"
+
+
 def _remember_synced(db: Database, entry: TimeEntry, worklog_id: Optional[str],
                      issue_key: Optional[str] = None):
     fingerprint = worklog_fingerprint(entry) if worklog_id else None

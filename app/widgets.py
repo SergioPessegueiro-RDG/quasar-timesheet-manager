@@ -60,6 +60,14 @@ def _color(spec: str) -> str:
     return getattr(theme, spec)
 
 
+def _style_color(spec: Optional[str], parent_bg: str) -> str:
+    """Like _color, plus the Quiet style's PARENT token (match the surface
+    the pill sits on, so unselected tabs are labels rather than plates)."""
+    if not spec or spec == "PARENT":
+        return parent_bg
+    return _color(spec)
+
+
 def _darken(hex_color: str, amount: float) -> str:
     """Blend `hex_color` toward black by `amount` (0-1). Used for the
     optional drop shadow on RoundedButton: the shadow is drawn as a
@@ -151,34 +159,34 @@ def _hex_bg_at(root, abs_x: int, abs_y: int, fallback: str, ignore=None) -> str:
 # ---------------------------------------------------------------------------
 # Buttons
 # ---------------------------------------------------------------------------
+def segmented_button_style(selected: bool) -> str:
+    """Chip for the active segment, plain label for the rest.
+
+    Same pairing as Today / Synced (Ghost) vs an unselected tab (Quiet):
+    selection is a light outlined pill, not a solid accent fill.
+    """
+    return "Ghost.TButton" if selected else "Quiet.TButton"
+
+
 _BUTTON_STYLES = {
-    # Padding matches theme.apply_theme()'s old ttk button padding exactly
-    # (14,8 / 10,6 / 10,6 / 8,5) -- not just for visual parity, but because
-    # several smoke tests (and the sidebar/calendar minimum-width layout
-    # itself) depend on the real pixel sizes these buttons occupy. Rounder
-    # corners are a drawing change, not a "make everything bigger" change.
-    #
-    # Secondary/Nav both idle at "SURFACE" rather than "APP_BG": APP_BG is
-    # this app's own darkest/outermost layer, which in every dark theme is
-    # *darker* than the PANEL_BG these buttons actually sit on -- so an
-    # APP_BG-filled button read as a dim notch sunk into its panel rather
-    # than a button, exactly the "hard to read" overlapping-element problem.
-    # SURFACE is a dedicated token that's deliberately a step *lighter* than
-    # PANEL_BG in every dark theme (matching how BORDER/BORDER_STRONG below
-    # already correctly lighten further still on hover/press), while
-    # keeping the original APP_BG look for light themes, where a slightly
-    # darker idle fill against a white/cream panel already reads fine. See
-    # theme.py's THEMES dict for where SURFACE is defined per theme.
+    # One vertical pad across chrome so Timesheet / Today / Synced / Start
+    # Timer share a height. Accent stays the only solid fill (Start Timer,
+    # Save, Push when there is something to send). Ghost is the outlined
+    # chip. Quiet is no plate -- idle fill matches the parent so unselected
+    # tabs read as labels, not extra buttons. "PARENT" is resolved at
+    # draw time against the canvas behind the pill.
     "Accent.TButton": dict(bg="ACCENT", hover="ACCENT_HOVER", press="ACCENT_HOVER", fg="#FFFFFF",
-                            bold=True, pad=(14, 8), border=None),
-    "Ghost.TButton": dict(bg="APP_BG", hover="SURFACE", press="BORDER", fg="TEXT_PRIMARY",
-                           bold=False, pad=(12, 8), border="BORDER_STRONG"),
+                            bold=True, pad=(10, 6), border=None),
+    "Ghost.TButton": dict(bg="SURFACE", hover="BORDER", press="BORDER_STRONG", fg="TEXT_PRIMARY",
+                           bold=False, pad=(10, 6), border="BORDER_STRONG"),
     "Secondary.TButton": dict(bg="SURFACE", hover="BORDER", press="BORDER_STRONG", fg="TEXT_PRIMARY",
-                               bold=False, pad=(10, 6), border=None),
+                               bold=False, pad=(10, 6), border="BORDER"),
+    "Quiet.TButton": dict(bg="PARENT", hover="SURFACE", press="BORDER", fg="TEXT_SECONDARY",
+                           bold=False, pad=(10, 6), border=None),
     "Danger.TButton": dict(bg="DANGER_SOFT", hover="DANGER_SOFT_ACTIVE", press="DANGER_SOFT_ACTIVE",
                             fg="DANGER", bold=False, pad=(10, 6), border=None),
     "Nav.TButton": dict(bg="SURFACE", hover="BORDER", press="BORDER_STRONG", fg="TEXT_PRIMARY",
-                         bold=False, pad=(8, 5), border=None),
+                         bold=False, pad=(10, 6), border="BORDER"),
 }
 
 
@@ -368,18 +376,22 @@ class RoundedButton(tk.Canvas):
             return
         spec = _BUTTON_STYLES[self._style]
         parent_bg = self.cget("bg") or theme.APP_BG
+        token = spec["press"] if self._pressed else spec["hover"] if self._hover else spec["bg"]
         if self._compact:
             # Idle circle matches the parent so +/− / ‹ › read as glyphs,
             # not as a square plate with a round button drawn inside.
-            fill = _color(spec["press"] if self._pressed else spec["hover"] if self._hover else spec["bg"])
+            fill = _style_color(token, parent_bg)
             if not self._hover and not self._pressed:
                 fill = parent_bg
             outline = ""
         else:
-            fill = _color(spec["press"] if self._pressed else spec["hover"] if self._hover else spec["bg"])
-            outline = _color(spec["border"]) if spec["border"] else ""
-        fg = _color(spec["fg"])
-        radius = min(w, h) / 2.0 if self._compact else BUTTON_RADIUS
+            fill = _style_color(token, parent_bg)
+            outline = _style_color(spec["border"], parent_bg) if spec["border"] else ""
+        fg = _style_color(spec["fg"], parent_bg)
+        # Stadium, not a rounded rectangle: the same pill Today / Synced
+        # already had because they were short enough for BUTTON_RADIUS to
+        # look circular. Taller accent labels used to look like slabs.
+        radius = min(w, h) / 2.0
         luminous = (self._style == "Accent.TButton" and not self._compact
                     and getattr(theme, "accent_is_luminous", lambda: False)())
         fill_end = ""
@@ -700,6 +712,11 @@ class RoundedCombobox(tk.Frame):
             theme.rounded_rect(c, 0.5, 0.5, w - 0.5, h - 0.5, radius=radius,
                                fill=fill, outline="")
         text = self._variable.get()
+        max_text = max(12, w - 36)
+        if text:
+            text = self._fit_popup_text(text, max_text)
+        if text not in self._values:
+            fg = theme.TEXT_MUTED
         c.create_text(14, h / 2, text=text, fill=fg, font=self._tkfont, anchor="w")
         cx, cy = w - 16, h / 2
         c.create_line(cx - 4, cy - 2, cx, cy + 2, cx + 4, cy - 2,

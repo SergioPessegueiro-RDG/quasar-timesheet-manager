@@ -327,6 +327,33 @@ class TestPushWorklogs(unittest.TestCase):
         self.assertEqual(result.updated, 0)
         self.assertEqual(result.created, 0)
 
+    def test_new_block_is_unsent_until_pushed(self):
+        entry = self.db.get_time_entry(self.entry_id)
+        count, minutes = jira_sync.unsent_worklog_totals([entry])
+        self.assertEqual(count, 1)
+        self.assertEqual(minutes, 60)
+        self.assertEqual(
+            jira_sync.push_button_state([entry]),
+            ("Push 1.0h", "Accent.TButton"))
+
+    def test_synced_week_shows_synced_button(self):
+        self._mark_synced()
+        entry = self.db.get_time_entry(self.entry_id)
+        self.assertEqual(jira_sync.unsent_worklog_totals([entry]), (0, 0))
+        self.assertEqual(
+            jira_sync.push_button_state([entry]),
+            ("Synced", "Ghost.TButton"))
+
+    def test_edited_synced_block_is_unsent_again(self):
+        self._mark_synced()
+        entry = self.db.get_time_entry(self.entry_id)
+        entry.notes = "rewrote the comment"
+        self.db.update_time_entry(entry)
+        stored = self.db.get_time_entry(self.entry_id)
+        count, minutes = jira_sync.unsent_worklog_totals([stored])
+        self.assertEqual(count, 1)
+        self.assertEqual(minutes, 60)
+
     def test_second_push_updates_when_notes_change(self):
         self._mark_synced()
         entry = self.db.get_time_entry(self.entry_id)
