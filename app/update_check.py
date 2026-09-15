@@ -30,7 +30,7 @@ from . import config
 # Must match this project's actual GitHub repo (see the remote in `git
 # remote -v`) -- there's nowhere else this could be auto-detected from
 # inside a packaged, offline-installed copy of the app.
-GITHUB_REPO = "AlexRae-RDG/quasar-timesheet-manager"
+GITHUB_REPO = "SergioPessegueiro-RDG/quasar-timesheet-manager"
 _LATEST_RELEASE_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 _RELEASES_PAGE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
 
