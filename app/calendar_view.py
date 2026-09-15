@@ -30,19 +30,16 @@ from .db import Database
 from .models import Activity, TemplateEntry, TimeEntry
 from .widgets import CARD_RADIUS, HorizontalVectorScrollbar, RoundedButton, RoundedCard, VectorScrollbar
 
-def _minutes_total() -> int:
-    """(END_HOUR - START_HOUR) * 60, computed fresh on every call instead
-    of once at import time. Settings' Work Hours section (see
-    app/panels.py's SettingsPanel and app/main_window.py's
-    _load_settings_panel) can change START_HOUR/END_HOUR at runtime -- a
-    plain module-level constant computed once here would go stale after
-    that until the app was restarted, silently breaking the grid's slot
-    count, canvas height, and every drag/resize boundary that depends on
-    it below."""
-    return (config.END_HOUR - config.START_HOUR) * 60
-
-
 EntryLike = Union[TimeEntry, TemplateEntry]
+
+
+def _minutes_total(start_hour: Optional[int] = None, end_hour: Optional[int] = None) -> int:
+    """Visible grid length in minutes. Defaults to Settings' work hours;
+    CalendarGrid passes an expanded window when a logged block sits
+    outside that range so the block stays on screen."""
+    start = config.START_HOUR if start_hour is None else start_hour
+    end = config.END_HOUR if end_hour is None else end_hour
+    return max(0, (end - start) * 60)
 
 # Tk's event.state bitmask for the Control key. This bit is consistent
 # across X11/Windows/macOS Tk builds (unlike, say, the Alt/Option bit,
@@ -53,14 +50,51 @@ EntryLike = Union[TimeEntry, TemplateEntry]
 CONTROL_STATE_MASK = 0x4
 
 
-def _minute_to_hhmm(minute_of_day: int) -> str:
-    total = config.START_HOUR * 60 + minute_of_day
-    return f"{total // 60:02d}:{total % 60:02d}"
+def _minute_to_hhmm(minute_of_day: int, start_hour: Optional[int] = None) -> str:
+    start = config.START_HOUR if start_hour is None else start_hour
+    total = start * 60 + minute_of_day
+    hour, minute = divmod(total, 60)
+    hour = min(24, max(0, hour))
+    if hour == 24:
+        return "24:00"
+    return f"{hour:02d}:{minute:02d}"
 
 
-def _hhmm_to_minute(hhmm: str) -> int:
+def _hhmm_to_minute(hhmm: str, start_hour: Optional[int] = None) -> int:
+    start = config.START_HOUR if start_hour is None else start_hour
     h, m = (int(x) for x in hhmm.split(":"))
-    return h * 60 + m - config.START_HOUR * 60
+    return h * 60 + m - start * 60
+
+
+def display_hours_for_entries(
+    entries: List[EntryLike],
+    base_start: int,
+    base_end: int,
+) -> Tuple[int, int]:
+    """Widen Settings' work-hour window just enough to show every block.
+
+    `base_end` is exclusive (17 = last slot ends at 5pm). Settings stay
+    put; only this week's timesheet/template canvas grows.
+    """
+    start = max(0, min(23, int(base_start)))
+    end = max(start + 1, min(24, int(base_end)))
+    for entry in entries:
+        try:
+            sh, sm = (int(x) for x in str(entry.start_time).split(":"))
+            eh, em = (int(x) for x in str(entry.end_time).split(":"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        start = min(start, max(0, min(23, sh)))
+        start_mins = sh * 60 + sm
+        end_mins = eh * 60 + em
+        if end_mins <= start_mins:
+            end = 24
+        else:
+            exclusive = eh if em == 0 else min(24, eh + 1)
+            end = max(end, exclusive)
+    if end <= start:
+        end = min(24, start + 1)
+    return start, end
 
 
 def format_day_total_hours(minutes: float) -> str:
@@ -144,6 +178,10 @@ class CalendarGrid(tk.Frame):
         self.day_width = config.DAY_WIDTH_PX
         self.slot_height = config.SLOT_HEIGHT_PX
         self.px_per_min = self.slot_height / config.SLOT_MINUTES
+        # Visible hour window. Starts as Settings' work hours, then
+        # widens whenever a logged block sits outside that range.
+        self._view_start_hour = config.START_HOUR
+        self._view_end_hour = config.END_HOUR
         # Manual zoom (the -/100%/+ controls in the nav row below): a
         # multiplier applied on top of the normal shrink-to-fit day
         # width/slot height, re-clamped to the same MIN/MAX bounds
@@ -202,6 +240,37 @@ class CalendarGrid(tk.Frame):
         # here at DAY_WIDTH_PX first, then again at the real size, is the
         # visible "calendar adjusting" jump on launch.
         self._emit_week_change()
+
+    def _view_minutes_total(self) -> int:
+        return _minutes_total(self._view_start_hour, self._view_end_hour)
+
+    def _view_minute_to_hhmm(self, minute_of_day: int) -> str:
+        return _minute_to_hhmm(minute_of_day, self._view_start_hour)
+
+    def _view_hhmm_to_minute(self, hhmm: str) -> int:
+        return _hhmm_to_minute(hhmm, self._view_start_hour)
+
+    def _update_view_hours(self, entries: List[EntryLike]) -> bool:
+        start, end = display_hours_for_entries(
+            entries, config.START_HOUR, config.END_HOUR)
+        if (start, end) == (self._view_start_hour, self._view_end_hour):
+            return False
+        self._view_start_hour = start
+        self._view_end_hour = end
+        return True
+
+    def _relayout_for_view_hours(self):
+        """Rebuild slot count after the visible hour window changes."""
+        self._grid_painted = False
+        try:
+            w, h = self._last_viewport_size
+        except (TypeError, ValueError):
+            w, h = 0, 0
+        if w > 1 and h > 1:
+            self._last_viewport_size = (0, 0)
+            self._recompute_grid_dimensions(w, h)
+            return
+        self.refresh()
 
     # ------------------------------------------------------------------
     # Layout / widgets
@@ -275,7 +344,7 @@ class CalendarGrid(tk.Frame):
         nav.after_idle(self._reflow_nav_row)
 
         canvas_width = self.gutter_width + len(config.DAY_NAMES) * self.day_width
-        canvas_height = self.header_height + _minutes_total() * self.px_per_min
+        canvas_height = self.header_height + self._view_minutes_total() * self.px_per_min
 
         # width/height here are just the initial preferred size (used to
         # size the window on first launch). The real sizing happens in
@@ -545,8 +614,9 @@ class CalendarGrid(tk.Frame):
         Split out from _on_canvas_resize so _zoom_in/_zoom_out can call
         this directly, reusing the last known viewport size, without
         needing an actual resize event to have just fired."""
+        self._update_view_hours(self._db_list_entries())
         num_days = len(config.DAY_NAMES)
-        num_slots = _minutes_total() / config.SLOT_MINUTES
+        num_slots = self._view_minutes_total() / config.SLOT_MINUTES
 
         available_h = max(0, viewport_h - self.header_height - config.CANVAS_BOTTOM_PAD_PX)
         raw_slot_height = available_h / num_slots if num_slots else config.SLOT_HEIGHT_PX
@@ -564,10 +634,17 @@ class CalendarGrid(tk.Frame):
                                            config.MAX_DAY_WIDTH_PX, self._zoom_mult)
 
         content_w = self.gutter_width + num_days * new_day_width
+        try:
+            current_h = float(self.canvas.cget("height") or 0)
+            current_w = float(self.canvas.cget("width") or 0)
+        except (tk.TclError, TypeError, ValueError):
+            current_h, current_w = 0.0, 0.0
         if (
             self._grid_painted
             and abs(new_day_width - self.day_width) < 0.51
             and abs(new_slot_height - self.slot_height) < 0.51
+            and abs(content_h - current_h) < 0.51
+            and abs(content_w - current_w) < 0.51
         ):
             self._update_scrollbars(viewport_w, viewport_h, content_w, content_h)
             return
@@ -815,12 +892,12 @@ class CalendarGrid(tk.Frame):
         if entry is None:
             return
         day_idx = self._entry_day_idx(entry)
-        start = _hhmm_to_minute(entry.start_time)
-        end = _hhmm_to_minute(entry.end_time)
+        start = self._view_hhmm_to_minute(entry.start_time)
+        end = self._view_hhmm_to_minute(entry.end_time)
         duration = end - start
 
         new_day_idx = max(0, min(len(config.DAY_NAMES) - 1, day_idx + day_delta))
-        new_start = max(0, min(_minutes_total() - duration, start + minute_delta))
+        new_start = max(0, min(self._view_minutes_total() - duration, start + minute_delta))
         if new_day_idx == day_idx and new_start == start:
             return  # already at an edge (day 0/4, or the top/bottom of the grid)
 
@@ -832,8 +909,8 @@ class CalendarGrid(tk.Frame):
         else:
             assert isinstance(entry, TimeEntry)
             entry.date = self.day_date(new_day_idx).isoformat()
-        entry.start_time = _minute_to_hhmm(new_start)
-        entry.end_time = _minute_to_hhmm(new_start + duration)
+        entry.start_time = self._view_minute_to_hhmm(new_start)
+        entry.end_time = self._view_minute_to_hhmm(new_start + duration)
         self._db_update_entry(entry)
         after = self._snapshot(entry, new_day_idx)
         self._push_undo({"kind": "update", "id": entry_id, "before": before, "after": after})
@@ -1070,6 +1147,10 @@ class CalendarGrid(tk.Frame):
         """Redraw the whole grid + entries from the database."""
         if paint_entries:
             self._cancel_entry_paint()
+        entries = self._db_list_entries()
+        if self._update_view_hours(entries) and paint_entries:
+            self._relayout_for_view_hours()
+            return
         c = self.canvas
         c.delete("all")
         c._aa_images = []
@@ -1085,7 +1166,7 @@ class CalendarGrid(tk.Frame):
 
         canvas_width = self.gutter_width + len(config.DAY_NAMES) * self.day_width
         grid_top = self.header_height
-        grid_bottom = grid_top + _minutes_total() * self.px_per_min
+        grid_bottom = grid_top + self._view_minutes_total() * self.px_per_min
 
         # Header background + day labels. Today's date used to sit on the
         # bottom lip of a too-short chip (half on the blue, half on the
@@ -1119,14 +1200,14 @@ class CalendarGrid(tk.Frame):
 
         # Horizontal slot lines + hour labels
         minute = 0
-        while minute <= _minutes_total():
+        while minute <= self._view_minutes_total():
             y = grid_top + minute * self.px_per_min
             is_hour = (minute % 60 == 0)
             c.create_line(self.gutter_width, y, canvas_width, y,
                            fill=theme.GRID_LINE_HOUR if is_hour else theme.GRID_LINE)
             if is_hour:
-                hour = config.START_HOUR + minute // 60
-                label = datetime.strptime(str(hour), "%H").strftime("%I %p").lstrip("0")
+                hour = self._view_start_hour + minute // 60
+                label = datetime.strptime(str(hour % 24), "%H").strftime("%I %p").lstrip("0")
                 c.create_text(self.gutter_width - 8, y, text=label, anchor="e",
                                font=(self.family, 8), fill=theme.TEXT_MUTED)
             minute += config.SLOT_MINUTES
@@ -1147,7 +1228,6 @@ class CalendarGrid(tk.Frame):
         # anything.
         self.entries_by_id = {}
         self._hover_slot = None
-        entries = self._db_list_entries()
         n_days = len(config.DAY_NAMES)
         totals = [0] * n_days
         entries_by_day: List[List[EntryLike]] = [[] for _ in range(n_days)]
@@ -1239,8 +1319,8 @@ class CalendarGrid(tk.Frame):
             if self.day_date(i) != today:
                 continue
             now = datetime.now()
-            minute_of_day = now.hour * 60 + now.minute - config.START_HOUR * 60
-            if not (0 <= minute_of_day <= _minutes_total()):
+            minute_of_day = now.hour * 60 + now.minute - self._view_start_hour * 60
+            if not (0 <= minute_of_day <= self._view_minutes_total()):
                 return
             x0 = self.gutter_width + i * self.day_width
             x1 = x0 + self.day_width
@@ -1285,7 +1365,7 @@ class CalendarGrid(tk.Frame):
         """
         result: Dict[int, Tuple[int, int]] = {}
         items = sorted(day_entries,
-                        key=lambda e: (_hhmm_to_minute(e.start_time), _hhmm_to_minute(e.end_time)))
+                        key=lambda e: (self._view_hhmm_to_minute(e.start_time), self._view_hhmm_to_minute(e.end_time)))
 
         def flush(cluster_items):
             if not cluster_items:
@@ -1294,8 +1374,8 @@ class CalendarGrid(tk.Frame):
             col_of_id: Dict[int, int] = {}
             for e in cluster_items:
                 assert e.id is not None
-                start = _hhmm_to_minute(e.start_time)
-                end = _hhmm_to_minute(e.end_time)
+                start = self._view_hhmm_to_minute(e.start_time)
+                end = self._view_hhmm_to_minute(e.end_time)
                 placed = False
                 for ci, last_end in enumerate(column_end_minutes):
                     if start >= last_end:
@@ -1314,8 +1394,8 @@ class CalendarGrid(tk.Frame):
         cluster: List[EntryLike] = []
         cluster_end = -1
         for e in items:
-            start = _hhmm_to_minute(e.start_time)
-            end = _hhmm_to_minute(e.end_time)
+            start = self._view_hhmm_to_minute(e.start_time)
+            end = self._view_hhmm_to_minute(e.end_time)
             if cluster and start >= cluster_end:
                 flush(cluster)
                 cluster = []
@@ -1350,8 +1430,8 @@ class CalendarGrid(tk.Frame):
                 x0 += gap / 2
             if col_index < col_count - 1:
                 x1 -= gap / 2
-        y0 = self.header_height + _hhmm_to_minute(entry.start_time) * self.px_per_min
-        y1 = self.header_height + _hhmm_to_minute(entry.end_time) * self.px_per_min
+        y0 = self.header_height + self._view_hhmm_to_minute(entry.start_time) * self.px_per_min
+        y1 = self.header_height + self._view_hhmm_to_minute(entry.end_time) * self.px_per_min
         return x0, y0, x1, y1
 
     _PREVIEW_CORNER_STEPS = max(18, int(config.BLOCK_CORNER_RADIUS * 2.5))
@@ -1471,7 +1551,7 @@ class CalendarGrid(tk.Frame):
     def _snapped_minute_for_y(self, y: float) -> int:
         raw = (y - self.header_height) / self.px_per_min
         snapped = round(raw / config.SLOT_MINUTES) * config.SLOT_MINUTES
-        return max(0, min(_minutes_total(), snapped))
+        return max(0, min(self._view_minutes_total(), snapped))
 
     def _entry_id_at(self, x: float, y: float) -> Optional[int]:
         for item in self.canvas.find_overlapping(x, y, x, y):
@@ -1522,8 +1602,8 @@ class CalendarGrid(tk.Frame):
                 "entry_id": entry_id,
                 "orig_entry": entry,
                 "start_day_idx": day_idx,
-                "start_minute": _hhmm_to_minute(entry.start_time),
-                "end_minute": _hhmm_to_minute(entry.end_time),
+                "start_minute": self._view_hhmm_to_minute(entry.start_time),
+                "end_minute": self._view_hhmm_to_minute(entry.end_time),
                 "anchor_x": event.x,
                 "anchor_y": event.y,
                 "moved": False,
@@ -1613,7 +1693,7 @@ class CalendarGrid(tk.Frame):
         start_min = min(state["anchor_minute"], minute)
         end_min = max(state["anchor_minute"], minute)
         if end_min == start_min:
-            end_min = min(_minutes_total(), start_min + config.SLOT_MINUTES)
+            end_min = min(self._view_minutes_total(), start_min + config.SLOT_MINUTES)
 
         x0 = self.gutter_width + day_idx * self.day_width + 3
         x1 = x0 + self.day_width - 6
@@ -1653,13 +1733,13 @@ class CalendarGrid(tk.Frame):
         elif state["mode"] == "resize-bottom":
             new_end = self._snapped_minute_for_y(event.y)
             new_end = max(new_end, state["start_minute"] + config.SLOT_MINUTES)
-            new_end = min(_minutes_total(), new_end)
+            new_end = min(self._view_minutes_total(), new_end)
             new_start = state["start_minute"]
             day_idx = state["start_day_idx"]
         else:  # move
             dy_minutes = round((event.y - state["anchor_y"]) / self.px_per_min / config.SLOT_MINUTES) * config.SLOT_MINUTES
             new_start = state["start_minute"] + dy_minutes
-            new_start = max(0, min(_minutes_total() - duration, new_start))
+            new_start = max(0, min(self._view_minutes_total() - duration, new_start))
             new_end = new_start + duration
             day_idx = self._day_idx_for_x(event.x)
             if day_idx is None:
@@ -1681,7 +1761,7 @@ class CalendarGrid(tk.Frame):
         label = entry.activity_name
         if entry.jira_key:
             label += f" [{entry.jira_key}]"
-        label += f"\n{_minute_to_hhmm(new_start)}–{_minute_to_hhmm(new_end)}"
+        label += f"\n{self._view_minute_to_hhmm(new_start)}–{self._view_minute_to_hhmm(new_end)}"
         self.canvas.itemconfigure(text_id, text=label, width=max(10, x1 - x0 - 10))
         self.canvas.coords(text_id, x0 + 6, y0 + 4)
         self.canvas.tag_raise(text_id, rect_id)
@@ -1712,30 +1792,30 @@ class CalendarGrid(tk.Frame):
             start_min = state["anchor_minute"]
             if armed:
                 duration = armed.default_duration_minutes or config.QDM_DROP_MINUTES
-                end_min = min(_minutes_total(), start_min + duration)
+                end_min = min(self._view_minutes_total(), start_min + duration)
                 if end_min == start_min:
                     return
                 self._place_qdm_block(armed, day_idx, start_min, end_min)
                 return
             else:
-                end_min = min(_minutes_total(), start_min + config.SLOT_MINUTES)
+                end_min = min(self._view_minutes_total(), start_min + config.SLOT_MINUTES)
                 self._open_entry_dialog(new=True, day_idx=day_idx,
-                                         start_hhmm=_minute_to_hhmm(start_min),
-                                         end_hhmm=_minute_to_hhmm(end_min),
+                                         start_hhmm=self._view_minute_to_hhmm(start_min),
+                                         end_hhmm=self._view_minute_to_hhmm(end_min),
                                          require_notes=True)
                 return
 
         start_min = min(state["anchor_minute"], state["cur_minute"])
         end_min = max(state["anchor_minute"], state["cur_minute"])
         if end_min == start_min:
-            end_min = min(_minutes_total(), start_min + config.SLOT_MINUTES)
+            end_min = min(self._view_minutes_total(), start_min + config.SLOT_MINUTES)
         armed = self.get_armed_activity()
         if armed:
             self._place_qdm_block(armed, day_idx, start_min, end_min)
             return
         self._open_entry_dialog(new=True, day_idx=day_idx,
-                                 start_hhmm=_minute_to_hhmm(start_min),
-                                 end_hhmm=_minute_to_hhmm(end_min),
+                                 start_hhmm=self._view_minute_to_hhmm(start_min),
+                                 end_hhmm=self._view_minute_to_hhmm(end_min),
                                  require_notes=True)
 
     def begin_qdm_drop(self, activity: Activity, event=None):
@@ -1960,10 +2040,10 @@ class CalendarGrid(tk.Frame):
             self._clear_qdm_slot_preview(state)
             return
         start_min = self._snapped_minute_for_y(y)
-        end_min = min(_minutes_total(), start_min + config.QDM_DROP_MINUTES)
+        end_min = min(self._view_minutes_total(), start_min + config.QDM_DROP_MINUTES)
         if end_min <= start_min:
-            start_min = max(0, _minutes_total() - config.QDM_DROP_MINUTES)
-            end_min = _minutes_total()
+            start_min = max(0, self._view_minutes_total() - config.QDM_DROP_MINUTES)
+            end_min = self._view_minutes_total()
             if end_min <= start_min:
                 return
 
@@ -2007,7 +2087,7 @@ class CalendarGrid(tk.Frame):
 
     def _place_qdm_block(self, activity, day_idx, start_min, end_min):
         if end_min <= start_min:
-            end_min = min(_minutes_total(), start_min + config.QDM_DROP_MINUTES)
+            end_min = min(self._view_minutes_total(), start_min + config.QDM_DROP_MINUTES)
         if end_min <= start_min:
             return
         # Always a 30-minute starting block from a sidebar drop. Jira
@@ -2015,8 +2095,8 @@ class CalendarGrid(tk.Frame):
         # start/end can be changed there. Cancel leaves no block.
         self._open_entry_dialog(
             new=True, day_idx=day_idx,
-            start_hhmm=_minute_to_hhmm(start_min),
-            end_hhmm=_minute_to_hhmm(end_min),
+            start_hhmm=self._view_minute_to_hhmm(start_min),
+            end_hhmm=self._view_minute_to_hhmm(end_min),
             placed_activity=activity,
             require_notes=True,
         )
@@ -2036,8 +2116,8 @@ class CalendarGrid(tk.Frame):
         day_idx = state.get("preview_day_idx", state["start_day_idx"])
         new_start = state.get("preview_start", state["start_minute"])
         new_end = state.get("preview_end", state["end_minute"])
-        new_start_hhmm = _minute_to_hhmm(new_start)
-        new_end_hhmm = _minute_to_hhmm(new_end)
+        new_start_hhmm = self._view_minute_to_hhmm(new_start)
+        new_end_hhmm = self._view_minute_to_hhmm(new_end)
 
         self.selected_entry_id = state["entry_id"]
 
@@ -2118,7 +2198,7 @@ class CalendarGrid(tk.Frame):
             self._clear_hover_preview()
             return
         minute = int((y - self.header_height) / self.px_per_min)
-        if minute < 0 or minute >= _minutes_total():
+        if minute < 0 or minute >= self._view_minutes_total():
             self._clear_hover_preview()
             return
         slot = (minute // config.SLOT_MINUTES) * config.SLOT_MINUTES
@@ -2308,7 +2388,7 @@ class CalendarGrid(tk.Frame):
                                     (existing.jira_project if existing else None)) or ""),
             on_save=on_save,
             on_delete=on_delete if existing else None,
-            start_hour=config.START_HOUR, end_hour=config.END_HOUR,
+            start_hour=self._view_start_hour, end_hour=self._view_end_hour,
             slot_minutes=config.SLOT_MINUTES,
             is_new=new,
             require_notes=require_notes,
