@@ -10,4 +10,4 @@ update; a value bumped ahead of an actual release means a real update
 gets missed until the next one ships. Either way, it belongs in the same
 commit as the version bump, not a separate one.
 """
-APP_VERSION = "2.7.0"
+APP_VERSION = "2.7.1"

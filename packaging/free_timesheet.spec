@@ -21,6 +21,7 @@ from the repo root, with PyInstaller installed (`pip install pyinstaller
 --break-system-packages` if needed) -- see the "Packaging as a native app"
 section in the main README for the full walkthrough per platform.
 """
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -31,6 +32,12 @@ from pathlib import Path
 PACKAGING_DIR = Path(SPECPATH).resolve()
 ROOT = PACKAGING_DIR.parent
 ICONS = PACKAGING_DIR / "icons"
+
+_version_spec = importlib.util.spec_from_file_location(
+    "app_version", ROOT / "app" / "version.py")
+_version_mod = importlib.util.module_from_spec(_version_spec)
+_version_spec.loader.exec_module(_version_mod)
+APP_VERSION = _version_mod.APP_VERSION
 
 APP_NAME = "QUASAR Timesheet Manager"
 
@@ -95,8 +102,10 @@ if sys.platform == "darwin":
         bundle_identifier="com.quasartimesheetmanager.app",
         info_plist={
             "NSHighResolutionCapable": True,
-            "CFBundleShortVersionString": "1.0.0",
-            "CFBundleVersion": "1.0.0",
+            # Finder / About This App read these -- keep them on
+            # app/version.py's APP_VERSION so they match Settings.
+            "CFBundleShortVersionString": APP_VERSION,
+            "CFBundleVersion": APP_VERSION,
             "NSHumanReadableCopyright": "Alex Rae and Sérgio Pessegueiro",
         },
     )

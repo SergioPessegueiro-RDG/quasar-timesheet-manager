@@ -356,7 +356,9 @@ hand, see "Updating the app" above (`Update and Reinstall App.command`).
 `.github/workflows/release.yml` runs both build scripts on GitHub's own
 macOS/Windows runners and attaches the results to a GitHub Release
 whenever a version tag is pushed. **First, bump `app/version.py`'s
-`APP_VERSION` to match** and commit that — the running app compares this
+`APP_VERSION` to match** and commit that — Settings, the in-app updater,
+and macOS About / Finder all read this (the packaged app's Info.plist is
+filled from it at build time). The running app compares this
 against the tag to power the "update available" popup covered below, so
 a tag pushed without a matching `APP_VERSION` bump means that popup
 either never fires for this release or fires again on the very build
