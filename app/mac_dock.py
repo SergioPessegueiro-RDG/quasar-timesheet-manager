@@ -1,23 +1,30 @@
-"""macOS Dock icon: full-bleed artwork clipped to the system squircle.
+"""macOS Dock icon: artwork clipped to a squircle on the icon grid.
 
-Tk's iconphoto is a raw square. Transparent pre-masked PNGs get the
-legacy inset (too small) and a black plate shows as a frame. macOS 27
-also does not clip a Dock-tile content view for us, so this rounds that
-view itself with CALayer's continuous corner curve -- the same shape as
-other Mac app icons -- and fills the tile.
+Tk's iconphoto is a raw square. setApplicationIconImage is the right
+size but also a square — macOS only squircles bundled .icns. A custom
+NSDockTile contentView can round the corners, but it fills the whole
+tile (bigger than neighbors) and fighting applicationIconImage flickers.
+
+The content view is a 128pt canvas with the rounded image inset to the
+Dock icon grid. Re-applying the same path is a no-op so launch retries
+don't flash.
 """
 from __future__ import annotations
 
 import ctypes
 import os
+import platform
 import sys
 
-# Standard NSDockTile is 128pt. 22.3% is the Mac app-icon corner.
-# Do not use the PNG pixel size here: macOS 27 resizes the content view
-# to the tile, so a 512px-derived radius cuts an X into the icon.
-_TILE_CORNER = 28
+_TILE_PT = 128.0
+# Bundled .icns sit on the icon grid, not edge-to-edge of the tile.
+_TILE_SCALE = 0.80
+# 22.3% of the *inner* squircle, same ratio as a Mac app icon.
+_TILE_CORNER_RATIO = 0.223
 
-_retain = []  # ObjC objects the Dock tile keeps drawing
+_retain = []
+_applied_path = None
+_applied_view = None
 
 
 def fill_dock_tile(path: str) -> bool:
@@ -30,6 +37,8 @@ def fill_dock_tile(path: str) -> bool:
 
 
 def _fill(path: str) -> bool:
+    global _applied_path, _applied_view
+
     ctypes.cdll.LoadLibrary(
         "/System/Library/Frameworks/Foundation.framework/Foundation")
     ctypes.cdll.LoadLibrary(
@@ -70,13 +79,23 @@ def _fill(path: str) -> bool:
     msg_void_byte = msg(None, ctypes.c_byte)
     msg_int = msg(ctypes.c_void_p, ctypes.c_int)
     msg_bool = msg(ctypes.c_void_p, ctypes.c_byte)
+    # NSRect is 4 doubles; on arm64 it is an HFA passed in d0–d3.
+    msg_init_frame = msg(
+        ctypes.c_void_p,
+        ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double)
+    msg_set_frame = ctypes.CFUNCTYPE(
+        None, ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double,
+    )(("objc_msgSend", libobjc))
 
     ns_image = cls("NSImage")
-    ns_view = cls("NSImageView")
+    ns_image_view = cls("NSImageView")
+    ns_view = cls("NSView")
     ns_app = cls("NSApplication")
     ns_string = cls("NSString")
     ns_number = cls("NSNumber")
-    if not all((ns_image, ns_view, ns_app, ns_string, ns_number)):
+    ns_color = cls("NSColor")
+    if not all((ns_image, ns_image_view, ns_view, ns_app, ns_string, ns_number, ns_color)):
         return False
 
     def nsstr(text: str):
@@ -84,6 +103,18 @@ def _fill(path: str) -> bool:
 
     def kvc(obj, key: str, value):
         msg_void_2id(obj, sel("setValue:forKey:"), value, nsstr(key))
+
+    app = msg0(ns_app, sel("sharedApplication"))
+    tile = msg0(app, sel("dockTile")) if app else None
+    if not tile:
+        return False
+
+    current = msg0(tile, sel("contentView"))
+    if path == _applied_path and _applied_view and current == _applied_view:
+        return True
+
+    if platform.machine() != "arm64":
+        return False
 
     ns_path = nsstr(path)
     if not ns_path:
@@ -95,30 +126,51 @@ def _fill(path: str) -> bool:
         return False
     msg0(image, sel("retain"))
 
-    view = msg_id(ns_view, sel("imageViewWithImage:"), image)
+    inner = _TILE_PT * _TILE_SCALE
+    pad = (_TILE_PT - inner) / 2.0
+    radius_pt = max(1, int(round(inner * _TILE_CORNER_RATIO)))
+
+    container = msg0(ns_view, sel("alloc"))
+    container = msg_init_frame(
+        container, sel("initWithFrame:"), 0.0, 0.0, _TILE_PT, _TILE_PT)
+    if not container:
+        return False
+    msg0(container, sel("retain"))
+    msg_void_byte(container, sel("setWantsLayer:"), 1)
+    msg_void_byte(container, sel("setOpaque:"), 0)
+
+    view = msg_id(ns_image_view, sel("imageViewWithImage:"), image)
     if not view:
         return False
     msg0(view, sel("retain"))
-    # Fill the tile, don't letterbox.
     msg_void_ul(view, sel("setImageScaling:"), 1)
     msg_void_byte(view, sel("setWantsLayer:"), 1)
     msg_void_byte(view, sel("setClipsToBounds:"), 1)
+    msg_void_byte(view, sel("setOpaque:"), 0)
+    msg_set_frame(view, sel("setFrame:"), pad, pad, inner, inner)
+    # Keep the inset when the Dock resizes the content view to the tile.
+    msg_void_ul(view, sel("setAutoresizingMask:"), 63)
 
-    layer = msg0(view, sel("layer"))
-    if not layer:
-        return False
     yes = msg_bool(ns_number, sel("numberWithBool:"), 1)
-    radius = msg_int(ns_number, sel("numberWithInt:"), _TILE_CORNER)
-    kvc(layer, "masksToBounds", yes)
-    kvc(layer, "cornerCurve", nsstr("continuous"))
-    kvc(layer, "cornerRadius", radius)
+    radius = msg_int(ns_number, sel("numberWithInt:"), radius_pt)
+    for layer_host in (container, view):
+        layer = msg0(layer_host, sel("layer"))
+        if not layer:
+            continue
+        kvc(layer, "masksToBounds", yes)
+        clear = msg0(ns_color, sel("clearColor"))
+        cg = msg0(clear, sel("CGColor")) if clear else None
+        if cg:
+            msg_void_id(layer, sel("setBackgroundColor:"), cg)
+        if layer_host is view:
+            kvc(layer, "cornerCurve", nsstr("continuous"))
+            kvc(layer, "cornerRadius", radius)
 
-    app = msg0(ns_app, sel("sharedApplication"))
-    tile = msg0(app, sel("dockTile"))
-    if not tile:
-        return False
-    msg_void_id(tile, sel("setContentView:"), view)
+    msg_void_id(container, sel("addSubview:"), view)
+    msg_void_id(tile, sel("setContentView:"), container)
     msg0(tile, sel("display"))
 
-    _retain[:] = [image, view, layer, yes, radius]
+    _retain[:] = [image, view, container, yes, radius]
+    _applied_path = path
+    _applied_view = container
     return True

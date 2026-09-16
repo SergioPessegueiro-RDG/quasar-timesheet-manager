@@ -387,9 +387,11 @@ class MainWindow(tk.Tk):
         """Set the window / Dock icon from the resolved light or dark mark.
 
         Packaged macOS Finder still uses the bundle .icns. The running
-        Dock tile and the in-window header follow Settings → App icon
+        Dock icon and the in-window header follow Settings → App icon
         (Auto / Dark / Light). iconphoto on Windows/Linux is a square;
-        on Mac we fill the Dock tile so the system clips it.
+        on Mac we put a rounded mark in an inset Dock tile so it matches
+        other apps (a full-bleed tile looks bigger; applicationIconImage
+        alone is a sharp square and flickers against the tile).
         """
         path = theme._app_icon_path()
         if not os.path.isfile(path):
