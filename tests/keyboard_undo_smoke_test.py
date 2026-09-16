@@ -54,8 +54,8 @@ def x_for_day(day_idx):
 def click(x, y, state=0):
     """A plain click: button-down then button-up at the same spot, with no
     motion in between -- exactly what _on_button1/_on_release treat as
-    "not moved" (selects a block, or quick-assigns/opens a blank dialog on
-    empty space)."""
+    "not moved" (selects a block, deselects on empty space, or
+    quick-assigns if a QDM is armed)."""
     cal._on_button1(fake_event(x, y, state))
     cal._on_release(fake_event(x, y, state))
 
@@ -111,13 +111,23 @@ check("Redoing the delete removes the block again",
            if e.activity_name == "Deep Work"])
 check("Redo stack is empty again (nothing left to redo)", not cal.can_redo())
 
-print("\n--- Escape deselects without deleting anything ---")
+print("\n--- Clicking empty space deselects without opening Time Block ---")
 new_id = db.add_time_entry(TimeEntry(
     None, act.id, act.name, act.jira_key, act.color,
     cal.day_date(2).isoformat(), "13:00", "14:00", ""))
 cal.refresh()
 win.update()
 # 13:00-14:00 with a 9am grid start is minutes 240-300; 270 is the middle.
+click(x_for_day(2), y_for_minute(270))
+check("Block selected before click-away", cal.selected_entry_id == new_id)
+click(x_for_day(4), y_for_minute(0))  # empty Friday slot
+win.update()
+check("Clicking empty space deselected the block", cal.selected_entry_id is None)
+check("Click-away did not open Time Block",
+      str(win.notebook.tab(win.timeblock_panel, "state")) == "hidden")
+check("Click-away did not delete the block", db.get_time_entry(new_id) is not None)
+
+print("\n--- Escape deselects without deleting anything ---")
 click(x_for_day(2), y_for_minute(270))
 check("Block selected before Escape", cal.selected_entry_id == new_id)
 cal._cancel_drag()  # bound to <Escape>
@@ -170,9 +180,15 @@ print("\n--- Undo/redo covers quick-assign create ---")
 sb._arm(act)
 win.update()
 before_count = len(cal.entries_by_id)
-click(x_for_day(4), y_for_minute(0))  # empty Friday slot at grid start, activity armed -> quick-assign
+click(x_for_day(4), y_for_minute(0))  # empty Friday slot at grid start, activity armed
 win.update()
-check("Quick-assign created a new block", len(cal.entries_by_id) == before_count + 1)
+check("Quick-assign opened Time Block for a description",
+      str(win.notebook.tab(win.timeblock_panel, "state")) == "normal")
+win.timeblock_panel.notes_text.delete("1.0", "end")
+win.timeblock_panel.notes_text.insert("1.0", "quick-assign notes")
+win.timeblock_panel._save()
+win.update()
+check("Saving the quick-assign created a new block", len(cal.entries_by_id) == before_count + 1)
 check("Undo stack has the quick-assign create", cal.can_undo())
 cal.undo()
 win.update()
@@ -268,8 +284,8 @@ win.update()
 print("\n--- Typing in a text field doesn't trigger undo/redo ---")
 win.notebook.select(win.timesheet_tab)
 win.update()
-win.calendar._on_button1(fake_event(x_for_day(0), y_for_minute(60)))
-win.calendar._on_release(fake_event(x_for_day(0), y_for_minute(60)))
+win.calendar._open_entry_dialog(new=True, day_idx=0,
+                                 start_hhmm="10:00", end_hhmm="10:15")
 win.update()
 check("Time Block tab opened", str(win.notebook.tab(win.timeblock_panel, "state")) == "normal")
 check("_is_typing_target recognizes the Notes box (a tk.Text)",

@@ -88,6 +88,29 @@ class TestRoundedRectSdf(unittest.TestCase):
         finally:
             theme.set_theme(previous)
 
+    def test_calendar_blocks_tint_the_grid_and_color_the_title(self):
+        previous = theme.get_theme_id()
+        try:
+            hue = "#6F9B86"
+            theme.set_theme("dark_mode")
+            fill = theme.calendar_block_fill(hue)
+            title = theme.calendar_block_title_color(hue, fill)
+            notes = theme.calendar_block_notes_color(hue, fill)
+            self.assertTrue(theme._is_dark(fill))
+            self.assertFalse(theme._is_dark(title))
+            self.assertNotEqual(notes.upper(), title.upper())
+            self.assertLess(theme._saturation(fill), theme._saturation(hue))
+            ink = theme.unsent_label_color(fill, hue)
+            self.assertLess(theme._saturation(ink), theme._saturation(theme.DANGER))
+            theme.set_theme("white")
+            fill = theme.calendar_block_fill(hue)
+            title = theme.calendar_block_title_color(hue, fill)
+            self.assertFalse(theme._is_dark(fill))
+            self.assertTrue(theme._is_dark(title))
+            self.assertNotEqual(title.upper(), theme.BLOCK_TEXT_DARK)
+        finally:
+            theme.set_theme(previous)
+
     def test_outline_sits_outside_the_fill(self):
         fill = "#4C6EF5"
         outline = "#111111"

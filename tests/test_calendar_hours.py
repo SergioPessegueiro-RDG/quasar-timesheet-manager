@@ -5,7 +5,12 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.calendar_view import display_hours_for_entries, _hhmm_to_minute, _minutes_total
+from datetime import datetime
+
+from app.calendar_view import (
+    display_hours_for_entries, _hhmm_to_minute, _minutes_total, _now_line_delay_ms,
+)
+from app.calendar_feed import CalendarEvent
 from app.models import TimeEntry
 
 
@@ -39,6 +44,26 @@ class TestDisplayHoursForEntries(unittest.TestCase):
         start, end = display_hours_for_entries([_entry("16:00", "02:00")], 9, 17)
         self.assertEqual(start, 9)
         self.assertEqual(end, 24)
+
+    def test_imported_meeting_outside_work_hours_widens_the_grid(self):
+        meeting = CalendarEvent("u", "Early standup", "2026-09-16", "08:00", "08:30")
+        start, end = display_hours_for_entries([meeting], 9, 17)
+        self.assertEqual(start, 8)
+        self.assertEqual(end, 17)
+
+
+class TestNowLineDelay(unittest.TestCase):
+    def test_waits_until_the_next_minute(self):
+        now = datetime(2026, 9, 16, 12, 15, 0, 0)
+        self.assertEqual(_now_line_delay_ms(now), 60_000)
+
+    def test_one_second_before_the_minute(self):
+        now = datetime(2026, 9, 16, 12, 15, 59, 0)
+        self.assertEqual(_now_line_delay_ms(now), 1_000)
+
+    def test_floor_near_the_minute_boundary(self):
+        now = datetime(2026, 9, 16, 12, 15, 59, 900_000)
+        self.assertEqual(_now_line_delay_ms(now), 250)
 
 
 if __name__ == "__main__":

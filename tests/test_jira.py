@@ -335,6 +335,16 @@ class TestPushWorklogs(unittest.TestCase):
         self.assertEqual(
             jira_sync.push_button_state([entry]),
             ("Push 1.0h", "Accent.TButton"))
+        self.assertTrue(jira_sync.entry_needs_push(entry))
+        line = jira_sync.format_push_preview_line(entry)
+        self.assertIn("09:00–10:00", line)
+        self.assertIn("QDM-42", line)
+        self.assertIn("Write sync", line)
+        plan = jira_sync.plan_worklog_push([entry])
+        summary = "\n".join(jira_sync.format_push_plan_lines(
+            plan, "2026-07-20", "2026-07-24"))
+        self.assertIn("New (1):", summary)
+        self.assertIn("Write sync · QDM-42", summary)
 
     def test_synced_week_shows_synced_button(self):
         self._mark_synced()

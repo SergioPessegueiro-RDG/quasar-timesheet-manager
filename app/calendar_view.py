@@ -26,7 +26,9 @@ from tkinter import messagebox
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from . import config, theme
+from .calendar_feed import CalendarEvent, format_meeting_details
 from .db import Database
+from .jira_sync import entry_needs_push
 from .models import Activity, TemplateEntry, TimeEntry
 from .widgets import CARD_RADIUS, HorizontalVectorScrollbar, RoundedButton, RoundedCard, VectorScrollbar
 
@@ -64,6 +66,19 @@ def _hhmm_to_minute(hhmm: str, start_hour: Optional[int] = None) -> int:
     start = config.START_HOUR if start_hour is None else start_hour
     h, m = (int(x) for x in hhmm.split(":"))
     return h * 60 + m - start * 60
+
+
+def _now_line_delay_ms(now: Optional[datetime] = None) -> int:
+    """Milliseconds until the now-line should next move.
+
+    The indicator is minute-resolution (see _draw_now_line), so the next
+    useful redraw is the start of the following minute. A 250ms floor
+    avoids a 0ms tight loop if a tick fires a few microseconds before
+    the minute rolls over.
+    """
+    now = now or datetime.now()
+    remaining_ms = (60 - now.second) * 1000 - now.microsecond // 1000
+    return max(250, remaining_ms)
 
 
 def display_hours_for_entries(
@@ -130,11 +145,66 @@ def wrap_block_text(text: str, chars_per_line: int) -> List[str]:
 
 
 def _ellipsis(text: str, chars_per_line: int) -> str:
-    text = (text or "").strip()
+    """Force a trailing … so a clipped wrap-line still reads as 'more'.
+
+    wrap_block_text already fits each chunk to `chars_per_line`, so a
+    naive 'trim if too long' would never add the mark — that's why tall
+    blocks used to drop leftover notes with no hint.
+    """
+    text = (text or "").strip().rstrip("…").rstrip()
     width = max(4, int(chars_per_line))
-    if len(text) <= width:
-        return text
-    return text[: max(1, width - 1)].rstrip() + "…"
+    budget = max(1, width - 1)
+    if len(text) > budget:
+        text = text[:budget].rstrip()
+    return text + "…"
+
+
+def _pack_block_lines(
+    sections: List[Tuple[List[str], bool]],
+    remaining: int,
+    chars_per_line: int,
+    time_line: str = "",
+) -> List[Tuple[str, bool]]:
+    """Fill `remaining` lines from (wrapped-parts, bold) sections.
+
+    If any later wrap-line is dropped, the last visible line gets an
+    ellipsis and the time range is omitted — the block's position already
+    shows when it is.
+    """
+    chosen: List[Tuple[str, bool]] = []
+    leftover = False
+    for parts, bold in sections:
+        for i, part in enumerate(parts):
+            if remaining <= 0:
+                leftover = True
+                break
+            if remaining == 1 and i < len(parts) - 1:
+                chosen.append((_ellipsis(part, chars_per_line), bold))
+                remaining = 0
+                leftover = True
+                break
+            chosen.append((part, bold))
+            remaining -= 1
+        if leftover:
+            break
+    if leftover:
+        if chosen and not chosen[-1][0].endswith("…"):
+            text, bold = chosen[-1]
+            chosen[-1] = (_ellipsis(text, chars_per_line), bold)
+    elif remaining > 0 and time_line:
+        chosen.append((time_line, False))
+    return chosen
+
+
+def _unsent_label_reserve(block_height: float) -> float:
+    """Space to keep at the bottom of a block for the Not synced caption.
+
+    Short slots skip the reserve so the title still fits; the caption
+    then sits on the last line instead.
+    """
+    if block_height >= 32:
+        return 16
+    return 0
 
 
 class CalendarGrid(tk.Frame):
@@ -151,6 +221,7 @@ class CalendarGrid(tk.Frame):
                  initial_week_start: Optional[date] = None,
                  template_mode: bool = False,
                  on_week_change: Optional[Callable[[date], None]] = None,
+                 get_overlay_events: Optional[Callable[[date], List[CalendarEvent]]] = None,
                  **kwargs):
         kwargs.setdefault("bg", theme.APP_BG)
         kwargs.setdefault("highlightthickness", 0)
@@ -162,6 +233,7 @@ class CalendarGrid(tk.Frame):
         self.open_duplicate = open_duplicate
         self.template_mode = template_mode
         self.on_week_change = on_week_change
+        self.get_overlay_events = get_overlay_events
         self.family = theme.resolve_font_family()
 
         if initial_week_start is not None:
@@ -210,18 +282,21 @@ class CalendarGrid(tk.Frame):
         self._pending_viewport: Optional[Tuple[int, int]] = None
         self._grid_painted = False
         self._entry_paint_job: Optional[str] = None
+        self._now_line_job: Optional[str] = None
         self._hover_slot: Optional[Tuple[int, int]] = None
         self._qdm_drop_binds: dict = {}
         self._qdm_ghost = None
 
         # Which block (by id), if any, is currently keyboard-selected -- set
         # by clicking a block without dragging it, or by dragging one to a
-        # new spot (see _finish_entry_drag). Drives the highlighted outline
+        # new spot (see _finish_entry_drag). Saving a brand-new Time Block
+        # does not select it. Drives the highlighted outline
         # in _draw_entry, the Delete-key shortcut, and arrow-key nudging
         # (see _on_left_key/_on_right_key/_on_up_key/_on_down_key in
         # main_window.py). Cleared whenever the selected block no longer
         # exists (see refresh()) or on Escape (see _cancel_drag).
         self.selected_entry_id: Optional[int] = None
+        self._overlay_drawn: List[CalendarEvent] = []
 
         # Undo/redo history for this grid only -- the Timesheet and
         # Template tabs each have their own CalendarGrid instance and their
@@ -240,6 +315,9 @@ class CalendarGrid(tk.Frame):
         # here at DAY_WIDTH_PX first, then again at the real size, is the
         # visible "calendar adjusting" jump on launch.
         self._emit_week_change()
+        if not self.template_mode:
+            self.bind("<Destroy>", self._on_grid_destroy, add="+")
+            self._schedule_now_line()
 
     def _view_minutes_total(self) -> int:
         return _minutes_total(self._view_start_hour, self._view_end_hour)
@@ -250,9 +328,13 @@ class CalendarGrid(tk.Frame):
     def _view_hhmm_to_minute(self, hhmm: str) -> int:
         return _hhmm_to_minute(hhmm, self._view_start_hour)
 
-    def _update_view_hours(self, entries: List[EntryLike]) -> bool:
+    def _update_view_hours(self, entries: List[EntryLike],
+                            extra: Optional[List[CalendarEvent]] = None) -> bool:
+        combined: List[object] = list(entries)
+        if extra:
+            combined.extend(extra)
         start, end = display_hours_for_entries(
-            entries, config.START_HOUR, config.END_HOUR)
+            combined, config.START_HOUR, config.END_HOUR)
         if (start, end) == (self._view_start_hour, self._view_end_hour):
             return False
         self._view_start_hour = start
@@ -1148,7 +1230,8 @@ class CalendarGrid(tk.Frame):
         if paint_entries:
             self._cancel_entry_paint()
         entries = self._db_list_entries()
-        if self._update_view_hours(entries) and paint_entries:
+        overlays = self._overlay_events()
+        if self._update_view_hours(entries, extra=overlays) and paint_entries:
             self._relayout_for_view_hours()
             return
         c = self.canvas
@@ -1217,6 +1300,16 @@ class CalendarGrid(tk.Frame):
             x = self.gutter_width + i * self.day_width
             c.create_line(x, 0, x, grid_bottom, fill=theme.GRID_LINE_HOUR)
 
+        # Imported work-calendar meetings sit behind logged blocks: pale,
+        # not selectable, not counted in totals. Drawn before the now-line
+        # and real entries so a booked block covers the guide underneath.
+        if paint_entries:
+            self._overlay_drawn = []
+            for event in overlays:
+                day_idx = self._overlay_day_idx(event)
+                if day_idx is not None:
+                    self._draw_overlay_event(event, day_idx)
+
         # "Now" indicator on today's column (normal mode only -- the
         # template isn't tied to any real date)
         if not self.template_mode:
@@ -1284,6 +1377,61 @@ class CalendarGrid(tk.Frame):
         except tk.TclError:
             pass
 
+    def _on_grid_destroy(self, event):
+        if event.widget is not self:
+            return
+        self._cancel_now_line()
+
+    def _schedule_now_line(self):
+        """Keep the orange now-line in the current minute without a full
+        grid refresh. Template weeks have no 'today', so they skip this."""
+        if self.template_mode:
+            return
+        self._cancel_now_line()
+        try:
+            if not self.winfo_exists():
+                return
+            self._now_line_job = self.after(_now_line_delay_ms(), self._tick_now_line)
+        except tk.TclError:
+            self._now_line_job = None
+
+    def _cancel_now_line(self):
+        job = self._now_line_job
+        if job is None:
+            return
+        self._now_line_job = None
+        try:
+            self.after_cancel(job)
+        except tk.TclError:
+            pass
+
+    def _tick_now_line(self):
+        self._now_line_job = None
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        self._redraw_now_line()
+        self._schedule_now_line()
+
+    def _redraw_now_line(self):
+        """Move just the now-line; leave the rest of the grid alone."""
+        if self.template_mode:
+            return
+        try:
+            self.canvas.delete("now_line")
+        except tk.TclError:
+            return
+        self._draw_now_line(date.today(), self.header_height)
+        if not self.canvas.find_withtag("now_line"):
+            return
+        # Match refresh() z-order: overlays, then now-line, then entries.
+        if self.canvas.find_withtag("entry"):
+            self.canvas.tag_lower("now_line", "entry")
+        elif self.canvas.find_withtag("overlay"):
+            self.canvas.tag_raise("now_line", "overlay")
+
     def _draw_day_totals(self, totals: List[int], today: date):
         """Paint each day's hours at the same x as that day's grid column."""
         c = self._totals_host
@@ -1325,8 +1473,11 @@ class CalendarGrid(tk.Frame):
             x0 = self.gutter_width + i * self.day_width
             x1 = x0 + self.day_width
             y = grid_top + minute_of_day * self.px_per_min
-            self.canvas.create_oval(x0 - 3, y - 3, x0 + 3, y + 3, fill=theme.NOW_LINE, outline="")
-            self.canvas.create_line(x0, y, x1, y, fill=theme.NOW_LINE, width=1.5)
+            self.canvas.create_oval(
+                x0 - 3, y - 3, x0 + 3, y + 3,
+                fill=theme.NOW_LINE, outline="", tags="now_line")
+            self.canvas.create_line(
+                x0, y, x1, y, fill=theme.NOW_LINE, width=1.5, tags="now_line")
             return
 
     def _update_hint(self):
@@ -1446,7 +1597,7 @@ class CalendarGrid(tk.Frame):
         mouse-up via refresh().
         """
         if mute:
-            fill = theme.block_fill(fill)
+            fill = theme.calendar_block_fill(fill)
         radius = min(config.BLOCK_CORNER_RADIUS, max(0.0, (x1 - x0) / 2), max(0.0, (y1 - y0) / 2))
         points = theme.rounded_rect_points(
             x0, y0, x1, y1, radius=radius, steps=self._PREVIEW_CORNER_STEPS)
@@ -1480,28 +1631,9 @@ class CalendarGrid(tk.Frame):
             " ".join(entry.notes.split()) if entry.notes else "", chars_per_line)
         time_line = f"{entry.start_time}–{entry.end_time}"
 
-        chosen: List[Tuple[str, bool]] = []
-        remaining = max_lines
-        for i, part in enumerate(name_parts):
-            if remaining <= 0:
-                break
-            if remaining == 1 and i < len(name_parts) - 1:
-                chosen.append((_ellipsis(part, chars_per_line), True))
-                remaining = 0
-                break
-            chosen.append((part, True))
-            remaining -= 1
-        for i, part in enumerate(notes_parts):
-            if remaining <= 0:
-                break
-            if remaining == 1 and i < len(notes_parts) - 1:
-                chosen.append((_ellipsis(part, chars_per_line), False))
-                remaining = 0
-                break
-            chosen.append((part, False))
-            remaining -= 1
-        if remaining > 0:
-            chosen.append((time_line, False))
+        chosen = _pack_block_lines(
+            [(name_parts, True), (notes_parts, False)],
+            max_lines, chars_per_line, time_line)
 
         result = []
         ty = y0 + 4
@@ -1518,24 +1650,153 @@ class CalendarGrid(tk.Frame):
         # high-contrast outline instead of the normal thin one -- the same
         # SELECTION_OUTLINE color every theme defines but nothing drew with
         # until this keyboard-selection feature existed.
-        fill = theme.block_fill(entry.color)
+        surface = self._day_column_bg(day_idx)
+        fill = theme.calendar_block_fill(entry.color, surface)
         outline_color = theme.SELECTION_OUTLINE if is_selected else ""
         outline_width = 2.5 if is_selected else 0
         ids = theme.place_rounded_rect(
             self.canvas, x0, y0, x1, y1, radius=config.BLOCK_CORNER_RADIUS,
             fill=fill, outline=outline_color, width=outline_width,
-            background=self._day_column_bg(day_idx), tags=("entry", tag), full=True,
+            background=surface, tags=("entry", tag), full=True,
             transparent_outside=True,
         )
         rect = ids[-1]
-        text_color = theme.block_text_color(fill)
-        for text, is_bold, ty in self._entry_text_lines(entry, x0, y0, x1, y1):
+        title_color = theme.calendar_block_title_color(entry.color, fill)
+        notes_color = theme.calendar_block_notes_color(entry.color, fill)
+        unsent = (not self.template_mode and isinstance(entry, TimeEntry)
+                  and entry_needs_push(entry) and (x1 - x0) > 20 and (y1 - y0) > 12)
+        reserve = _unsent_label_reserve(y1 - y0) if unsent else 0
+        rail = 5
+        for text, is_bold, ty in self._entry_text_lines(
+                entry, x0 + rail, y0, x1, y1 - reserve):
+            item = self.canvas.create_text(
+                x0 + 8 + rail, ty, text=text, anchor="nw",
+                font=(self.family, 9 if is_bold else 8, "bold" if is_bold else "normal"),
+                fill=title_color if is_bold else notes_color, tags=("entry_text", tag),
+            )
+            self.canvas.tag_raise(item, rect)
+        if (x1 - x0) > 22 and (y1 - y0) > 16:
+            self._draw_color_rail(x0, y0, y1, tag,
+                                  theme.calendar_block_rail_color(entry.color, fill))
+        if unsent:
+            self._draw_unsent_label(x0 + rail, y0, x1, y1, fill, tag, entry.color)
+
+    def _draw_color_rail(self, x0, y0, y1, tag, color):
+        """3px identity stripe — Apple Calendar's colored leading edge."""
+        x = x0 + 5
+        pad = 8 if (y1 - y0) > 24 else 5
+        self.canvas.create_line(
+            x, y0 + pad, x, y1 - pad,
+            fill=color, width=3, capstyle="round",
+            tags=("entry", tag),
+        )
+
+    def _draw_unsent_label(self, x0, y0, x1, y1, block_fill, tag, project_color=None):
+        """Quiet 'Not synced' caption — no chip, no alarm red."""
+        font = tkfont.Font(family=self.family, size=8)
+        label = "Not synced"
+        if font.measure(label) > (x1 - x0 - 16):
+            label = "Unsynced"
+        if (y1 - y0) < 14:
+            return
+        self.canvas.create_text(
+            x0 + 8, y1 - 6, text=label, anchor="sw",
+            font=font, fill=theme.unsent_label_color(block_fill, project_color),
+            tags=("entry", tag, "unsent"),
+        )
+
+    def _overlay_events(self) -> List[CalendarEvent]:
+        """Imported meetings for this week -- empty on the Template tab."""
+        if self.template_mode or self.get_overlay_events is None:
+            return []
+        try:
+            events = self.get_overlay_events(self.week_start) or []
+        except Exception:
+            return []
+        return [e for e in events if not getattr(e, "all_day", False)]
+
+    def _overlay_day_idx(self, event: CalendarEvent) -> Optional[int]:
+        try:
+            day = date.fromisoformat(event.date)
+        except (TypeError, ValueError):
+            return None
+        idx = (day - self.week_start).days
+        if 0 <= idx < len(config.DAY_NAMES):
+            return idx
+        return None
+
+    def _overlay_text_lines(self, event: CalendarEvent, x0, y0, x1, y1):
+        """Wrap the meeting title (and location/time if the block is tall
+        enough) the same way logged blocks wrap QDM names -- one ellipsis
+        line was wasting the rest of the pale rectangle."""
+        avail_w = max(10, x1 - x0 - 16)
+        avail_h = max(8, y1 - y0 - 8)
+        chars_per_line = max(6, int(avail_w / 6.0))
+        line_pitch = 14
+        max_lines = max(1, int(avail_h // line_pitch))
+
+        title = (event.title or "").strip() or "(busy)"
+        title_parts = wrap_block_text(title, chars_per_line)
+        location_parts = wrap_block_text(
+            " ".join((event.location or "").split()), chars_per_line)
+        time_line = f"{event.start_time}–{event.end_time}"
+
+        chosen = _pack_block_lines(
+            [(title_parts, True), (location_parts, False)],
+            max_lines, chars_per_line, time_line)
+
+        result = []
+        ty = y0 + 4
+        for text, bold in chosen:
+            result.append((text, bold, ty))
+            ty += line_pitch
+        return result
+
+    def _draw_overlay_event(self, event: CalendarEvent, day_idx: int):
+        x0, y0, x1, y1 = self._entry_geometry(event, day_idx)
+        grid_top = self.header_height
+        grid_bottom = grid_top + self._view_minutes_total() * self.px_per_min
+        y0 = max(y0, grid_top)
+        y1 = min(y1, grid_bottom)
+        if y1 - y0 < 4:
+            return
+        index = len(self._overlay_drawn)
+        self._overlay_drawn.append(event)
+        tag = f"guide_{index}"
+        surface = self._day_column_bg(day_idx)
+        fill = theme.overlay_fill(surface)
+        outline = theme.overlay_outline(surface)
+        ids = theme.place_rounded_rect(
+            self.canvas, x0, y0, x1, y1, radius=config.BLOCK_CORNER_RADIUS,
+            fill=fill, outline=outline, width=1,
+            background=surface, tags=("overlay", tag), full=True,
+            transparent_outside=True,
+        )
+        if y1 - y0 < 14:
+            return
+        rect = ids[-1] if ids else None
+        for text, is_bold, ty in self._overlay_text_lines(event, x0, y0, x1, y1):
             item = self.canvas.create_text(
                 x0 + 8, ty, text=text, anchor="nw",
                 font=(self.family, 9 if is_bold else 8, "bold" if is_bold else "normal"),
-                fill=text_color, tags=("entry_text", tag),
+                fill=theme.overlay_text_color(),
+                tags=("overlay", "overlay_text", tag),
             )
-            self.canvas.tag_raise(item, rect)
+            if rect is not None:
+                self.canvas.tag_raise(item, rect)
+
+    def _overlay_event_at(self, x: float, y: float) -> Optional[CalendarEvent]:
+        for item in reversed(self.canvas.find_overlapping(x, y, x, y)):
+            for t in self.canvas.gettags(item):
+                if not t.startswith("guide_"):
+                    continue
+                try:
+                    idx = int(t.split("_", 1)[1])
+                except ValueError:
+                    continue
+                if 0 <= idx < len(self._overlay_drawn):
+                    return self._overlay_drawn[idx]
+        return None
 
     # ------------------------------------------------------------------
     # Hit testing helpers
@@ -1610,10 +1871,10 @@ class CalendarGrid(tk.Frame):
             }
             return
 
-        # Empty-area click: either quick-assign or start a create-drag.
-        # Clicking away from every block also deselects whatever was
-        # selected, same as clicking empty space in most calendar/drawing
-        # apps.
+        # Empty-area click: deselect if something was highlighted, then
+        # start a create-drag. A click that never moves past the drag
+        # threshold will not open Time Block (see _finish_create) — that's
+        # how you click away to deselect without being asked to log time.
         if self.selected_entry_id is not None:
             self.selected_entry_id = None
             self.refresh()
@@ -1644,8 +1905,9 @@ class CalendarGrid(tk.Frame):
         additionally fires on top of that for the second press only --
         see CONTROL_STATE_MASK's comment above for the same
         "most-specific-pattern-wins" rule), so on empty space that first
-        click already started a create-drag/quick-assign same as always;
-        there's nothing more to do here for that case.
+        click already ran as an ordinary empty-space click (deselect, or
+        quick-assign if a QDM is armed); there's nothing more to do here
+        for that case.
 
         entry_id is looked up fresh here rather than reusing anything
         from _drag_state, since _on_button1 already ran once for this same
@@ -1717,7 +1979,7 @@ class CalendarGrid(tk.Frame):
             state["drag_rect_id"] = None
             state["drag_text_id"] = self.canvas.create_text(
                 0, 0, text="", anchor="nw",
-                fill=theme.block_text_color(theme.block_fill(entry.color)),
+                fill=theme.calendar_block_title_color(entry.color),
                 font=(self.family, 8, "bold"), justify="left",
             )
 
@@ -1786,8 +2048,11 @@ class CalendarGrid(tk.Frame):
         day_idx = state["anchor_day_idx"]
 
         if not state["moved"]:
-            # Plain click. Quick-assign if an activity is armed; else open a
-            # blank dialog for the clicked slot.
+            # Plain click on empty space. An armed QDM still places a
+            # block (that's the "click a slot" shortcut). Otherwise this
+            # is just click-away: selection was already cleared in
+            # _on_button1. Opening Time Block here is what made deselect
+            # feel like creating a log — drag a slot to add one instead.
             armed = self.get_armed_activity()
             start_min = state["anchor_minute"]
             if armed:
@@ -1796,14 +2061,7 @@ class CalendarGrid(tk.Frame):
                 if end_min == start_min:
                     return
                 self._place_qdm_block(armed, day_idx, start_min, end_min)
-                return
-            else:
-                end_min = min(self._view_minutes_total(), start_min + config.SLOT_MINUTES)
-                self._open_entry_dialog(new=True, day_idx=day_idx,
-                                         start_hhmm=self._view_minute_to_hhmm(start_min),
-                                         end_hhmm=self._view_minute_to_hhmm(end_min),
-                                         require_notes=True)
-                return
+            return
 
         start_min = min(state["anchor_minute"], state["cur_minute"])
         end_min = max(state["anchor_minute"], state["cur_minute"])
@@ -1853,8 +2111,8 @@ class CalendarGrid(tk.Frame):
     def _ensure_qdm_ghost(self, activity: Activity, event=None):
         if self._qdm_ghost is not None:
             return
-        fill = theme.block_fill(activity.color or theme.ACCENT)
-        fg = theme.block_text_color(fill)
+        fill = theme.calendar_block_fill(activity.color or theme.ACCENT)
+        fg = theme.calendar_block_title_color(activity.color or theme.ACCENT, fill)
         name = (activity.name or "").strip() or "QDM"
         title_lines = wrap_block_text(name, 28)[:2] or [name]
         meta_bits = []
@@ -2051,7 +2309,7 @@ class CalendarGrid(tk.Frame):
         x1 = x0 + self.day_width - 6
         y0 = self.header_height + start_min * self.px_per_min
         y1 = self.header_height + end_min * self.px_per_min
-        fill = theme.block_fill(state["activity"].color)
+        fill = theme.calendar_block_fill(state["activity"].color)
         geom = (round(x0), round(y0), round(x1), round(y1), fill)
         if state.get("_aa_geom") != geom:
             self._discard_preview_items(state)
@@ -2225,15 +2483,26 @@ class CalendarGrid(tk.Frame):
     # ------------------------------------------------------------------
     def _on_right_click(self, event):
         entry_id = self._entry_id_at(event.x, event.y)
-        if entry_id is None:
+        if entry_id is not None:
+            entry = self.entries_by_id[entry_id]
+            menu = tk.Menu(self, tearoff=0)
+            menu.add_command(label="Edit…", command=lambda: self._edit_entry(entry))
+            menu.add_command(label="Duplicate…", command=lambda: self._open_duplicate_dialog(entry))
+            menu.add_separator()
+            menu.add_command(label="Delete", command=lambda: self._delete_entry(entry))
+            menu.tk_popup(event.x_root, event.y_root)
             return
-        entry = self.entries_by_id[entry_id]
-        menu = tk.Menu(self, tearoff=0)
-        menu.add_command(label="Edit…", command=lambda: self._edit_entry(entry))
-        menu.add_command(label="Duplicate…", command=lambda: self._open_duplicate_dialog(entry))
-        menu.add_separator()
-        menu.add_command(label="Delete", command=lambda: self._delete_entry(entry))
-        menu.tk_popup(event.x_root, event.y_root)
+        meeting = self._overlay_event_at(event.x, event.y)
+        if meeting is None:
+            return
+        self._show_meeting_details(meeting)
+
+    def _show_meeting_details(self, event: CalendarEvent):
+        messagebox.showinfo(
+            event.title or "Meeting",
+            format_meeting_details(event),
+            parent=self.winfo_toplevel(),
+        )
 
     def _edit_entry(self, entry: EntryLike):
         self._open_entry_dialog(new=False, existing=entry)
@@ -2339,7 +2608,10 @@ class CalendarGrid(tk.Frame):
                 new_id = self._db_add_entry(entry)
                 self._push_undo({"kind": "add", "items": [
                     {"id": new_id, "fields": self._snapshot(entry, target_day_idx)}]})
-                self.selected_entry_id = new_id
+                # Creating a block is not a selection — the outline is for
+                # click/keyboard targets (Delete, arrow nudges), not a
+                # "you just saved this" highlight.
+                self.selected_entry_id = None
                 committed = entry
             else:
                 assert existing is not None

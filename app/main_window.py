@@ -12,7 +12,7 @@ from datetime import date, timedelta
 from tkinter import messagebox, ttk
 from typing import Optional
 
-from . import auto_update, config, jira_client, jira_sync, theme, update_check
+from . import auto_update, calendar_feed, config, jira_client, jira_sync, theme, update_check
 from .calendar_view import CalendarGrid
 from .db import Database
 from .export_csv import export_entries
@@ -118,6 +118,12 @@ class MainWindow(tk.Tk):
         self.family = theme.apply_theme(self)
         self.configure(bg=theme.APP_BG)
         self._jira_sync_in_flight = False
+        self._calendar_feed = calendar_feed.CalendarFeed()
+        self._calendar_overlay_enabled = (
+            (self.db.get_setting("calendar_overlay_enabled", "1") or "1") == "1"
+        )
+        self._calendar_feed_in_flight = False
+        self._calendar_status_text = ""
         self._worklog_pull_seq = 0
         # Python 3.14's Tcl refuses widget.after() from a worker thread
         # ("main thread is not in main loop"). Background Jira/update
@@ -157,6 +163,7 @@ class MainWindow(tk.Tk):
         # After the window is clickable. These used to fire at 400ms and
         # freeze the first second with a full sidebar+calendar rebuild.
         self.after(2000, self._sync_qdms_on_startup)
+        self.after(2200, self._refresh_calendar_feed_on_startup)
         self.after(2500, self._check_for_updates)
 
     def _call_on_ui(self, fn):
@@ -805,6 +812,7 @@ class MainWindow(tk.Tk):
             open_duplicate=self._open_duplicate_panel,
             initial_week_start=initial_week_start,
             on_week_change=self._pull_worklogs_for_week,
+            get_overlay_events=self._overlay_events_for_week,
         )
         orig_refresh = self.calendar.refresh
 
@@ -1293,7 +1301,8 @@ class MainWindow(tk.Tk):
 
         def on_save(new_display_name, new_theme_id,
                     new_work_start_hour, new_work_end_hour, new_show_weekends,
-                    new_show_timer_bar, new_header_style, jira_fields=None):
+                    new_show_timer_bar, new_header_style, jira_fields=None,
+                    calendar_fields=None):
             self.db.set_setting("jira_display_name", new_display_name)
             self.db.set_setting("work_start_hour", str(new_work_start_hour))
             self.db.set_setting("work_end_hour", str(new_work_end_hour))
@@ -1301,6 +1310,9 @@ class MainWindow(tk.Tk):
             self.db.set_setting("show_timer_bar", "1" if new_show_timer_bar else "0")
             self.db.set_setting("header_style", new_header_style)
             self._persist_jira_fields(jira_fields or {})
+            old_calendar_urls = calendar_feed.saved_ics_urls(self.db.get_setting)
+            self._persist_calendar_fields(calendar_fields or {})
+            new_calendar_urls = calendar_feed.saved_ics_urls(self.db.get_setting)
 
             # Always persist the Custom palette's current seed colors,
             # whether or not "custom" is the theme actually being saved --
@@ -1348,6 +1360,13 @@ class MainWindow(tk.Tk):
             else:
                 theme.apply_window_opacity(self)
 
+            if new_calendar_urls != old_calendar_urls:
+                self.after(0, lambda urls=new_calendar_urls: self._refresh_calendar_feed(
+                    quiet=True, urls=urls))
+            elif new_theme_id == current_theme_id and not hours_changed and not chrome_changed:
+                if hasattr(self, "calendar"):
+                    self.calendar.refresh()
+
         self.settings_panel.load(
             display_name, current_theme_id, current_work_start_hour,
             current_work_end_hour, current_show_weekends,
@@ -1358,7 +1377,12 @@ class MainWindow(tk.Tk):
             jira_project_key=self.db.get_setting("jira_project_key", "QDM") or "QDM",
             on_test_jira=self._test_jira_connection,
             on_sync_jira=self._sync_qdms_from_jira_fields,
+            calendar_ics_urls=calendar_feed.saved_ics_urls(self.db.get_setting),
+            calendar_overlay_enabled=self._calendar_overlay_enabled,
+            on_refresh_calendar=self._refresh_calendar_from_settings,
         )
+        if self._calendar_status_text:
+            self.settings_panel.calendar_status_label.config(text=self._calendar_status_text)
 
     def _open_settings_dialog(self):
         # Settings is a permanent tab now (see _build_body) -- this just
@@ -1459,6 +1483,188 @@ class MainWindow(tk.Tk):
             self.db.set_setting("jira_api_token", fields["api_token"].strip())
         if "project_key" in fields:
             self.db.set_setting("jira_project_key", (fields.get("project_key") or "QDM").strip() or "QDM")
+
+    def _persist_calendar_fields(self, fields: dict):
+        if not fields:
+            return
+        if "ics_urls" in fields:
+            urls = calendar_feed.normalize_url_list(fields.get("ics_urls") or [])
+        elif "ics_url" in fields:
+            urls = calendar_feed.normalize_url_list([fields.get("ics_url") or ""])
+        else:
+            urls = None
+        if urls is not None:
+            self.db.set_setting("calendar_ics_urls", calendar_feed.dump_ics_url_list(urls))
+            self.db.set_setting("calendar_ics_url", urls[0] if urls else "")
+        if "overlay_enabled" in fields:
+            enabled = bool(fields.get("overlay_enabled"))
+            self.db.set_setting("calendar_overlay_enabled", "1" if enabled else "0")
+            self._calendar_overlay_enabled = enabled
+
+    def _overlay_events_for_week(self, week_start: date):
+        if not getattr(self, "_calendar_overlay_enabled", True):
+            return []
+        feed = getattr(self, "_calendar_feed", None)
+        if feed is None:
+            return []
+        end = week_start + timedelta(days=len(config.DAY_NAMES) - 1)
+        return feed.events_between(week_start, end)
+
+    def _set_calendar_status(self, text: str):
+        self._calendar_status_text = text or ""
+        settings = getattr(self, "settings_panel", None)
+        label = getattr(settings, "calendar_status_label", None) if settings is not None else None
+        if label is None:
+            return
+        try:
+            label.config(text=self._calendar_status_text)
+        except tk.TclError:
+            pass
+
+    def _refresh_calendar_feed_on_startup(self):
+        self._refresh_calendar_feed(quiet=True)
+
+    def _refresh_calendar_from_settings(self, fields: dict):
+        self._persist_calendar_fields(fields or {})
+        urls = calendar_feed.normalize_url_list((fields or {}).get("ics_urls") or [])
+        if not urls:
+            urls = calendar_feed.normalize_url_list([(fields or {}).get("ics_url") or ""])
+        self._refresh_calendar_feed(quiet=False, urls=urls)
+
+    def _refresh_calendar_feed(self, *, quiet: bool = True, urls: Optional[list] = None,
+                               url: Optional[str] = None):
+        if getattr(self, "_calendar_feed_in_flight", False):
+            return
+        if urls is None and url is not None:
+            urls = [url]
+        if urls is None:
+            urls = calendar_feed.saved_ics_urls(self.db.get_setting)
+        urls = calendar_feed.normalize_url_list(urls)
+        if not urls:
+            self._calendar_feed.clear()
+            calendar_feed.clear_all_caches()
+            if hasattr(self, "calendar"):
+                self.calendar.refresh()
+            self._set_calendar_status("No calendar link saved.")
+            if not quiet:
+                self._jira_alert(
+                    "Work calendar",
+                    "Paste an ICS calendar link first, then Refresh.",
+                    kind="info")
+            return
+
+        self._calendar_feed_in_flight = True
+        n_links = len(urls)
+        self._set_calendar_status(
+            "Fetching calendars…" if n_links > 1 else "Fetching calendar…")
+
+        def worker():
+            cached_feed = calendar_feed.CalendarFeed()
+            for i, ics_url in enumerate(urls):
+                cached = calendar_feed.read_cache_for(ics_url)
+                if not cached and i == 0:
+                    cached = calendar_feed.read_cache()
+                if not cached:
+                    continue
+                try:
+                    parsed = calendar_feed.parse_ics(cached)
+                    cached_feed.extend(parsed, source_id=calendar_feed.source_id_for(ics_url))
+                except Exception:
+                    continue
+            if not cached_feed.is_empty():
+                self._call_on_ui(
+                    lambda cached_feed=cached_feed, n_links=n_links: self._apply_calendar_feed(
+                        cached_feed, quiet=True, done=False,
+                        status="Showing cached calendar…" if n_links == 1
+                        else "Showing cached calendars…",
+                        source_count=n_links))
+
+            fresh = calendar_feed.CalendarFeed()
+            errors = []
+            ok = 0
+            for ics_url in urls:
+                try:
+                    text = calendar_feed.fetch_ics(ics_url)
+                    calendar_feed.write_cache_for(ics_url, text)
+                    parsed = calendar_feed.parse_ics(text)
+                    fresh.extend(parsed, source_id=calendar_feed.source_id_for(ics_url))
+                    ok += 1
+                except Exception as exc:
+                    err = str(exc)
+                    calendar_feed._log(f"fetch failed ({ics_url}): {type(exc).__name__}: {exc}")
+                    errors.append(err)
+                    cached = calendar_feed.read_cache_for(ics_url)
+                    if cached:
+                        try:
+                            parsed = calendar_feed.parse_ics(cached)
+                            fresh.extend(parsed, source_id=calendar_feed.source_id_for(ics_url))
+                        except Exception:
+                            pass
+            if ok == 0 and fresh.is_empty():
+                err = errors[0] if errors else "Couldn't fetch the calendar."
+                if len(errors) > 1:
+                    err = f"{len(errors)} calendar links failed. {errors[0]}"
+                self._call_on_ui(
+                    lambda err=err, quiet=quiet: self._calendar_feed_failed(err, quiet=quiet))
+                return
+            self._call_on_ui(
+                lambda fresh=fresh, quiet=quiet, errors=errors, n_links=n_links, ok=ok:
+                self._apply_calendar_feed(
+                    fresh, quiet=quiet, errors=errors,
+                    source_count=n_links, fetched_count=ok))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_calendar_feed(self, feed, *, quiet: bool = True, done: bool = True,
+                             status: Optional[str] = None, errors: Optional[list] = None,
+                             source_count: int = 1, fetched_count: Optional[int] = None):
+        if done:
+            self._calendar_feed_in_flight = False
+        self._calendar_feed = feed
+        if hasattr(self, "calendar"):
+            try:
+                self.calendar.refresh()
+            except tk.TclError:
+                return
+        n = 0
+        if hasattr(self, "calendar"):
+            start = self.calendar.week_start
+            end = start + timedelta(days=len(config.DAY_NAMES) - 1)
+            n = len(feed.events_between(start, end))
+        fail_n = len(errors or [])
+        if status:
+            msg = status
+        elif not self._calendar_overlay_enabled:
+            msg = f"Loaded {n} meeting(s). Turn on the pale guide to show them."
+        elif source_count > 1:
+            msg = f"Showing {n} meeting(s) from {source_count} calendars."
+        elif n:
+            msg = f"Showing {n} meeting(s) on this week as a pale guide."
+        else:
+            msg = "Calendar loaded — no timed meetings on this week."
+        if fail_n and done:
+            msg += f" {fail_n} link(s) failed to refresh."
+        self._set_calendar_status(msg)
+        if not quiet:
+            if fail_n and (errors or [""])[0]:
+                detail = "\n\n".join(errors[:3])
+                self._jira_alert(
+                    "Work calendar",
+                    f"{msg}\n\n{detail}",
+                    kind="warning" if fetched_count == 0 else "info")
+            else:
+                self._jira_alert("Work calendar", msg, kind="info")
+
+    def _calendar_feed_failed(self, err: str, quiet: bool = True):
+        self._calendar_feed_in_flight = False
+        cached_note = ""
+        if not self._calendar_feed.is_empty():
+            cached_note = " Showing the last cached calendar instead."
+        self._set_calendar_status(f"{err}{cached_note}")
+        if quiet:
+            calendar_feed._log(f"startup calendar fetch failed: {err}")
+            return
+        self._jira_alert("Work calendar", f"{err}{cached_note}")
 
     def _jira_creds(self, fields: Optional[dict] = None) -> jira_client.JiraCredentials:
         if fields:
@@ -1667,43 +1873,10 @@ class MainWindow(tk.Tk):
                     kind="info")
             return
 
-        lines = [
-            f"Log hours to Jira for {start_date} – {end_date}?",
-            "",
-        ]
-        if plan.create:
-            lines.append(f"  • {len(plan.create)} new worklog(s) will be added")
-        if plan.update:
-            lines.append(
-                f"  • {len(plan.update)} existing worklog(s) will be updated "
-                "(description, time, or day changed)")
-        if plan.move:
-            lines.append(
-                f"  • {len(plan.move)} worklog(s) will be moved to a different QDM")
-        if plan.remove_key:
-            lines.append(
-                f"  • {len(plan.remove_key)} worklog(s) will be removed "
-                "(block no longer has a Jira Issue Key)")
-        if plan.pending_deletes:
-            lines.append(
-                f"  • {len(plan.pending_deletes)} deleted block(s) will be "
-                "removed from Jira")
-        if plan.unchanged:
-            lines.append(
-                f"  • {len(plan.unchanged)} unchanged block(s) will be skipped")
-        if plan.skipped:
-            lines.append(
-                f"  • {len(plan.skipped)} block(s) skipped (no Jira Issue Key)")
-        if plan.too_short:
-            lines.append(
-                f"  • {len(plan.too_short)} block(s) shorter than 1 minute "
-                "cannot be logged")
-        lines += [
-            "",
-            "Only real changes are sent (new blocks, edits, and deletions).",
-            "It does not change ticket status, assignee, description, or anything else.",
-        ]
-        if not messagebox.askyesno("Push to Jira", "\n".join(lines), parent=self):
+        if not messagebox.askyesno(
+                "Push to Jira",
+                "\n".join(jira_sync.format_push_plan_lines(plan, start_date, end_date)),
+                parent=self):
             return
 
         self._set_jira_busy(True, "Logging hours to Jira…")
@@ -1814,10 +1987,12 @@ class MainWindow(tk.Tk):
             "• File → Sync QDMs from Jira… pulls open issues into the sidebar "
             "(needs a token in Settings). File → Push hours to Jira… logs "
             "the week's blocks as worklogs on those issues — CSV export is "
-            "still there as a fallback.\n\n"
+            "still there as a fallback. “Not synced” on a timesheet block "
+            "means that block has not been pushed yet.\n\n"
             "Keyboard shortcuts (click the calendar first so it has focus):\n"
             "• Click a block (without dragging) to select it -- it gets a "
-            "highlighted outline.\n"
+            "highlighted outline. Click empty space to deselect (a drag on "
+            "empty space still creates a block).\n"
             "• Delete or Backspace: remove the selected block (same confirmation "
             "as the right-click menu's Delete).\n"
             "• Left/Right arrow: with a block selected, move it to the previous/"

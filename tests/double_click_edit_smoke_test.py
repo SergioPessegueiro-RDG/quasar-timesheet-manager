@@ -102,20 +102,19 @@ check("Time Block tab hides again after Cancel",
 
 print("\n--- Double-clicking empty calendar space does nothing extra ---")
 # Empty-space double-click: the FIRST press/release of it is an ordinary
-# empty-space click, and that alone already opens a blank "New Time
-# Block" dialog with no activity armed (pre-existing behavior -- see
-# _finish_create -- nothing to do with this feature). What this section
-# actually checks is that _on_double_click's own contribution stays a
-# no-op on top of that (no crash, no second dialog, no phantom entry),
-# since _entry_id_at finds no block at an empty spot.
+# empty-space click, which now deselects (or no-ops) instead of opening
+# a blank New Time Block. What this section actually checks is that
+# _on_double_click's own contribution stays a no-op on top of that (no
+# crash, no dialog, no phantom entry), since _entry_id_at finds no block
+# at an empty spot.
 win.timeblock_panel._cancel()
 win.update()
 entries_before = len(cal.entries_by_id)
 double_click(x_for_day(3), y_for_minute(300))
 win.update()
-check("The first press's plain-click behavior (blank New dialog) still happens",
-      win.timeblock_panel.heading.cget("text") == "New Time Block")
-check("But nothing is actually created without Save being clicked",
+check("Empty-space double-click does not open Time Block",
+      str(win.notebook.tab(win.timeblock_panel, "state")) == "hidden")
+check("Nothing is created without a drag",
       len(cal.entries_by_id) == entries_before)
 win.timeblock_panel._cancel()
 win.update()

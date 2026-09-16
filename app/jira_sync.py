@@ -315,6 +315,34 @@ def classify_worklog_push(entry: TimeEntry) -> PushAction:
     return "update"
 
 
+def entry_needs_push(entry: TimeEntry) -> bool:
+    """True when this block would actually be written on the next Push."""
+    return classify_worklog_push(entry) in {
+        "create", "update", "move", "remove_key",
+    }
+
+
+def format_push_preview_line(entry: TimeEntry) -> str:
+    """One-line label for an unsent block (confirmation dialog / lists)."""
+    try:
+        day = datetime.strptime(entry.date, "%Y-%m-%d").date()
+        idx = day.weekday()
+        if 0 <= idx < len(config.DAY_NAMES):
+            day_label = config.DAY_NAMES[idx]
+        else:
+            day_label = day.strftime("%a")
+        when = f"{day_label} {day.day} {entry.start_time}–{entry.end_time}"
+    except ValueError:
+        when = f"{entry.date} {entry.start_time}–{entry.end_time}"
+    name = (entry.activity_name or "").strip()
+    key = (entry.jira_key or "").strip()
+    if name and key:
+        label = f"{name} · {key}"
+    else:
+        label = name or key or "(no QDM)"
+    return f"{when}  {label}"
+
+
 @dataclass
 class PushPlan:
     create: List[TimeEntry] = field(default_factory=list)
@@ -350,6 +378,50 @@ def plan_worklog_push(
             "too_short": "too_short",
         }[action]).append(entry)
     return plan
+
+
+def format_push_plan_lines(plan: PushPlan, start_date: str, end_date: str) -> List[str]:
+    """Confirmation copy for Push: which blocks will actually be sent."""
+    lines = [
+        f"Log hours to Jira for {start_date} – {end_date}?",
+        "",
+    ]
+    sections = (
+        ("New", plan.create),
+        ("Updated", plan.update),
+        ("Moved to a different QDM", plan.move),
+        ("Removed (no Jira Issue Key)", plan.remove_key),
+    )
+    for title, items in sections:
+        if not items:
+            continue
+        lines.append(f"{title} ({len(items)}):")
+        for entry in items[:8]:
+            lines.append(f"  • {format_push_preview_line(entry)}")
+        if len(items) > 8:
+            lines.append(f"  …and {len(items) - 8} more")
+        lines.append("")
+    if plan.pending_deletes:
+        lines.append(f"Deleted locally ({len(plan.pending_deletes)}), will remove from Jira:")
+        for item in plan.pending_deletes[:8]:
+            lines.append(f"  • {item.date}  {item.jira_key}")
+        if len(plan.pending_deletes) > 8:
+            lines.append(f"  …and {len(plan.pending_deletes) - 8} more")
+        lines.append("")
+    if plan.unchanged:
+        lines.append(f"  • {len(plan.unchanged)} unchanged block(s) will be skipped")
+    if plan.skipped:
+        lines.append(f"  • {len(plan.skipped)} block(s) skipped (no Jira Issue Key)")
+    if plan.too_short:
+        lines.append(
+            f"  • {len(plan.too_short)} block(s) shorter than 1 minute cannot be logged")
+    if plan.unchanged or plan.skipped or plan.too_short:
+        lines.append("")
+    lines += [
+        "Only real changes are sent (new blocks, edits, and deletions).",
+        "It does not change ticket status, assignee, description, or anything else.",
+    ]
+    return lines
 
 
 def unsent_worklog_totals(

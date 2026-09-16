@@ -127,13 +127,33 @@ sudo pacman -S tk                # Arch
   **Duplicate…** copies a block onto other weekdays you check off.
 - Overlapping blocks are allowed — the calendar splits them into
   side-by-side columns automatically.
+- **Not synced** on a logged block means it has not been pushed to Jira
+  yet (new or edited since the last Push). Click **Push** to see the
+  list before sending.
+
+**Work calendar overlay**
+- Settings → **Work Calendar**: paste ICS links from Outlook on the web
+  (**Settings → Calendar → Shared calendars → Publish a calendar**).
+  `webcal://` links are rewritten to `https://` automatically.
+- **Add ICS link** if you have more than one calendar (personal, team,
+  shared). All of them overlay on the Timesheet together.
+- Meetings for the open week show as **pale blocks behind your logged
+  hours** — a visual guide of where you were, not booked time.
+  Titles wrap to fill the block. They don't count toward daily totals,
+  don't export to Jira, and left-clicks pass through so you can still
+  drag a time block on top. **Right-click** a pale meeting for title,
+  time, location, organizer, and description.
+- **Refresh calendars** pulls the latest ICS. Links are stored only on
+  this machine (same as the Jira token). Uncheck the guide if you want it
+  off without deleting the links.
 
 **Keyboard shortcuts & undo/redo** (click the calendar first so it has
 focus)
-- **Click** a block to select it; **Delete**/**Backspace** removes it.
+- **Click** a block to select it; **click empty space** (or **Esc**) to
+  deselect. **Delete**/**Backspace** removes the selected block.
 - **Left/Right arrow**: moves a selected block a day, or the whole week if
   nothing's selected. **Up/Down arrow**: moves a selected block's time
-  earlier/later. **Esc**: cancels a drag or deselects.
+  earlier/later. **Esc**: cancels a drag in progress.
 - **Ctrl+Z**/**Cmd+Z** undoes the last change on the current tab;
   **Ctrl+Shift+Z**/**Ctrl+Y** redoes it. Timesheet and Template each keep
   their own undo history.
@@ -261,6 +281,7 @@ app/models.py                Activity / Project / TimeEntry / TemplateEntry data
 app/db.py                     SQLite layer (auto-migrates older DBs; backup_to/restore_from)
 app/export_csv.py              Jira-matching CSV export
 app/calendar_view.py            the weekly grid: drag/resize/move/duplicate, selection, undo/redo
+app/calendar_feed.py             Outlook/Google ICS overlay (published calendar URL)
 app/timeblock_panel.py           embedded Add/Edit Time Block tab
 app/summary_panel.py              the Summary tab
 app/panels.py                      Duplicate/Activity/Project/Settings/Backup & Restore/Export tabs

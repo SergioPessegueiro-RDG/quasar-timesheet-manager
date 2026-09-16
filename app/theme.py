@@ -145,6 +145,84 @@ def block_fill(color: str, surface: str = None) -> str:
     return _mix(softened, surface, toward)
 
 
+def calendar_block_fill(color: str, surface: str = None) -> str:
+    """Tinted glass over the grid — Apple Calendar, not a pastel sticker.
+
+    Dark chrome keeps a dark wash of the project hue so the block sits
+    *in* the UI; light chrome gets a pale wash. Title ink is a separate
+    chromatic color (see calendar_block_title_color), the way Reminders
+    and Calendar color the label rather than dropping black on mint.
+    """
+    hue = _project_hex(color)
+    surface = surface or GRID_BG
+    washed = _desaturate(hue, 0.10)
+    if _is_dark(surface):
+        return _mix(surface, washed, 0.40)
+    return _mix(surface, washed, 0.30)
+
+
+def calendar_block_title_color(color: str, fill: str = None) -> str:
+    """Project hue as the title: lifted on dark tints, deepened on light."""
+    hue = _project_hex(color)
+    fill = fill or calendar_block_fill(hue)
+    if _is_dark(fill):
+        lifted = _mix(_desaturate(hue, 0.06), "#FFFFFF", 0.40)
+        if _is_dark(lifted):
+            lifted = _mix(lifted, "#FFFFFF", 0.40)
+        return lifted
+    deepened = _mix(hue, BLOCK_TEXT_DARK, 0.22)
+    if not _is_dark(deepened):
+        deepened = _mix(deepened, BLOCK_TEXT_DARK, 0.35)
+    return deepened
+
+
+def calendar_block_notes_color(color: str, fill: str = None) -> str:
+    """Notes recede: same hue as the title, mixed back toward the fill."""
+    fill = fill or calendar_block_fill(color)
+    title = calendar_block_title_color(color, fill)
+    return _mix(title, fill, 0.32)
+
+
+def calendar_block_rail_color(color: str, fill: str = None) -> str:
+    """Left accent on the tinted chip — the saturated identity stripe."""
+    hue = _project_hex(color)
+    fill = fill or calendar_block_fill(hue)
+    if _is_dark(fill):
+        return _mix(hue, "#FFFFFF", 0.20)
+    return _mix(hue, BLOCK_TEXT_DARK, 0.08)
+
+
+def unsent_label_color(block_fill: str, project_color: str = None) -> str:
+    """Dusty red caption that follows the block's ink, not a Danger pill."""
+    if project_color:
+        ink = calendar_block_notes_color(project_color, block_fill)
+    else:
+        ink = block_text_color(block_fill)
+    return _mix(DANGER, ink, 0.50)
+
+
+def _project_hex(color: str) -> str:
+    raw = (color or "").strip()
+    return raw if raw.startswith("#") else ACCENT
+
+
+def overlay_fill(surface: str = None) -> str:
+    """Wash used for imported calendar meetings -- a guide, not a logged
+    block. Mixes the accent toward the grid so it stays visible on light
+    and dark themes without competing with real time entries on top."""
+    surface = surface or GRID_BG
+    return _mix(ACCENT, surface, 0.82)
+
+
+def overlay_outline(surface: str = None) -> str:
+    surface = surface or GRID_BG
+    return _mix(ACCENT, surface, 0.62)
+
+
+def overlay_text_color() -> str:
+    return TEXT_MUTED
+
+
 def derive_palette(app_bg: str, panel_bg: str, text_primary: str, accent: str,
                     danger: str = None, now_line: str = None,
                     accent_b: str = None) -> dict:

@@ -45,6 +45,7 @@ _SHORTCUTS = [
     ("Up / Down arrow", "Move the selected block earlier/later by one time slot"),
     ("Delete or Backspace", "Delete the selected block"),
     ("Esc", "Cancel a drag in progress, un-arm a queued activity, or deselect a block"),
+    ("Click empty calendar space", "Deselect the highlighted block (without opening Time Block)"),
     ("Ctrl+Click a block", "Instantly duplicate it into its own exact time slot "
                             "(drag the copy afterward to retime it)"),
     ("Enter (in a form field)", "Save the current Add/Edit Project, QDM, or "
@@ -717,7 +718,53 @@ class SettingsPanel(tk.Frame):
         self.on_test_jira: Optional[Callable[[dict], None]] = None
         self.on_sync_jira: Optional[Callable[[dict], None]] = None
 
-        hours_card = _settings_card(left, 2)
+        calendar_card = _settings_card(left, 2)
+        _settings_heading(calendar_card, "Work Calendar", self.family)
+        _settings_hint(
+            calendar_card,
+            "Paste ICS links from Outlook on the web → Settings → Calendar → "
+            "Shared calendars → Publish a calendar. Add as many as you want — "
+            "personal, team, shared. Meetings show as a pale guide on the "
+            "Timesheet so you can see where to log hours — they are not booked "
+            "time, and the links never leave this machine.",
+            self.family, 1)
+        cal_fields = tk.Frame(calendar_card, bg=theme.SURFACE)
+        cal_fields.grid(row=2, column=0, columnspan=2, sticky="ew")
+        cal_fields.columnconfigure(0, weight=1)
+
+        tk.Label(cal_fields, text="ICS links", bg=theme.SURFACE, fg=theme.TEXT_PRIMARY,
+                 font=(self.family, 10)).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self._calendar_rows_host = tk.Frame(cal_fields, bg=theme.SURFACE)
+        self._calendar_rows_host.grid(row=1, column=0, sticky="ew")
+        self._calendar_rows_host.columnconfigure(0, weight=1)
+        self._calendar_url_rows: List[dict] = []
+        self._add_calendar_url_row("")
+
+        add_row = tk.Frame(cal_fields, bg=theme.SURFACE)
+        add_row.grid(row=2, column=0, sticky="w", pady=(0, 8))
+        RoundedButton(add_row, text="Add ICS link", style="Secondary.TButton",
+                      command=lambda: self._add_calendar_url_row(""),
+                      bg=theme.SURFACE).pack(side="left")
+        tk.Label(cal_fields, text="https://outlook.office.com/…/calendar.ics  — webcal:// is fine too",
+                 fg=theme.TEXT_MUTED, bg=theme.SURFACE, font=(self.family, 8)).grid(
+            row=3, column=0, sticky="w", pady=(0, 10))
+
+        self.calendar_overlay_var = tk.BooleanVar(value=True)
+        RoundedCheckbutton(cal_fields, text="Show meetings as a pale guide on the Timesheet",
+                           variable=self.calendar_overlay_var, bg=theme.SURFACE).grid(
+            row=4, column=0, sticky="w", pady=(0, 12))
+
+        cal_btns = tk.Frame(cal_fields, bg=theme.SURFACE)
+        cal_btns.grid(row=5, column=0, sticky="w", pady=(0, 4))
+        RoundedButton(cal_btns, text="Refresh calendars", style="Secondary.TButton",
+                      command=self._refresh_calendar, bg=theme.SURFACE).pack(side="left")
+        self.calendar_status_label = tk.Label(cal_fields, text="", fg=theme.TEXT_SECONDARY,
+                                               bg=theme.SURFACE, font=(self.family, 9),
+                                               wraplength=420, justify="left")
+        self.calendar_status_label.grid(row=6, column=0, sticky="w", pady=(4, 0))
+        self.on_refresh_calendar: Optional[Callable[[dict], None]] = None
+
+        hours_card = _settings_card(left, 3)
         _settings_heading(hours_card, "Work Hours", self.family)
         _settings_hint(
             hours_card,
@@ -760,7 +807,7 @@ class SettingsPanel(tk.Frame):
                  fg=theme.TEXT_MUTED, bg=theme.SURFACE, justify="left", wraplength=420,
                  font=(self.family, 9)).grid(row=5, column=0, columnspan=2, sticky="w")
 
-        heading_card = _settings_card(left, 3)
+        heading_card = _settings_card(left, 4)
         _settings_heading(heading_card, "Heading", self.family)
         _settings_hint(
             heading_card,
@@ -778,7 +825,7 @@ class SettingsPanel(tk.Frame):
             btn.pack(side="left", padx=(0, 6))
             self.header_style_buttons[key] = btn
 
-        theme_card = _settings_card(left, 4, pady=(0, 0))
+        theme_card = _settings_card(left, 5, pady=(0, 0))
         _settings_heading(theme_card, "Theme", self.family)
         self.theme_description_label = tk.Label(
             theme_card, text="", fg=theme.TEXT_MUTED, bg=theme.SURFACE, justify="left",
@@ -844,6 +891,60 @@ class SettingsPanel(tk.Frame):
             "api_token": self.jira_token_var.get().strip(),
             "project_key": (self.jira_project_key_var.get().strip() or "QDM"),
         }
+
+    def calendar_fields(self) -> dict:
+        return {
+            "ics_urls": [row["var"].get() for row in self._calendar_url_rows],
+            "overlay_enabled": bool(self.calendar_overlay_var.get()),
+        }
+
+    def _add_calendar_url_row(self, url: str = ""):
+        host = self._calendar_rows_host
+        row = tk.Frame(host, bg=theme.SURFACE)
+        row.pack(fill="x", pady=(0, 6))
+        row.columnconfigure(0, weight=1)
+        var = tk.StringVar(value=url or "")
+        entry = RoundedEntry(row, textvariable=var, width=36, bg=theme.SURFACE)
+        entry.pack(side="left", fill="x", expand=True)
+        RoundedButton(
+            row, text="Remove", style="Secondary.TButton",
+            command=lambda f=row: self._remove_calendar_url_row(f),
+            bg=theme.SURFACE,
+        ).pack(side="left", padx=(8, 0))
+        self._calendar_url_rows.append({"frame": row, "var": var, "entry": entry})
+        _rebind_wheel(row)
+        if len(self._calendar_url_rows) > 1 and not (url or "").strip():
+            try:
+                entry.focus_set()
+            except tk.TclError:
+                pass
+        return entry
+
+    def _remove_calendar_url_row(self, frame):
+        if len(self._calendar_url_rows) <= 1:
+            self._calendar_url_rows[0]["var"].set("")
+            return
+        remaining = []
+        for row in self._calendar_url_rows:
+            if row["frame"] is frame:
+                row["frame"].destroy()
+            else:
+                remaining.append(row)
+        self._calendar_url_rows = remaining
+
+    def _set_calendar_urls(self, urls: List[str]):
+        for row in self._calendar_url_rows:
+            row["frame"].destroy()
+        self._calendar_url_rows = []
+        values = list(urls or [])
+        if not values:
+            values = [""]
+        for url in values:
+            self._add_calendar_url_row(url)
+
+    def _refresh_calendar(self):
+        if self.on_refresh_calendar is not None:
+            self.on_refresh_calendar(self.calendar_fields())
 
     def _test_jira(self):
         if self.on_test_jira is not None:
@@ -1072,10 +1173,14 @@ class SettingsPanel(tk.Frame):
               on_save: Callable, jira_site_url: str = "", jira_email: str = "",
               jira_api_token: str = "", jira_project_key: str = "QDM",
               on_test_jira: Optional[Callable[[dict], None]] = None,
-              on_sync_jira: Optional[Callable[[dict], None]] = None):
+              on_sync_jira: Optional[Callable[[dict], None]] = None,
+              calendar_ics_url: str = "", calendar_overlay_enabled: bool = True,
+              on_refresh_calendar: Optional[Callable[[dict], None]] = None,
+              calendar_ics_urls: Optional[List[str]] = None):
         self.on_save = on_save
         self.on_test_jira = on_test_jira
         self.on_sync_jira = on_sync_jira
+        self.on_refresh_calendar = on_refresh_calendar
         self.display_name_var.set(display_name)
         self.jira_url_var.set(jira_site_url)
         self.jira_email_var.set(jira_email)
@@ -1085,6 +1190,17 @@ class SettingsPanel(tk.Frame):
             self.jira_status_label.config(text="Token saved locally. Test the connection, then Sync QDMs.")
         else:
             self.jira_status_label.config(text="No token yet — paste one above, or set QUASAR_JIRA_TOKEN.")
+        urls = list(calendar_ics_urls or [])
+        if not urls and calendar_ics_url:
+            urls = [calendar_ics_url]
+        self._set_calendar_urls(urls)
+        self.calendar_overlay_var.set(calendar_overlay_enabled)
+        if any(u.strip() for u in urls):
+            n = len([u for u in urls if u.strip()])
+            self.calendar_status_label.config(
+                text=f"{n} calendar link(s) saved locally. Refresh to pull this week’s meetings.")
+        else:
+            self.calendar_status_label.config(text="No calendar link yet — paste an Outlook ICS URL above.")
         self.theme_var.set(theme.resolve_theme_id(current_theme_id))
         self.custom_seeds = theme.get_custom_seeds()
         self._custom_seeds_on_load = dict(self.custom_seeds)
@@ -1123,6 +1239,7 @@ class SettingsPanel(tk.Frame):
             not self.hide_timer_var.get(),
             self.header_style_choice,
             self.jira_fields(),
+            self.calendar_fields(),
         )
         show_saved_toast(self)
         self.on_close()
