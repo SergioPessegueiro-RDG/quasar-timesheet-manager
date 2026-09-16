@@ -323,7 +323,7 @@ class SummaryPanel(tk.Frame):
         qdm_rows.sort(key=lambda r: -r["minutes"])
 
         self._refresh_breakdown(self._project, project_rows, "project", "projects")
-        self._refresh_breakdown(self._qdm, qdm_rows, "QDM", "QDM's")
+        self._refresh_breakdown(self._qdm, qdm_rows, "QDM", "QDMs")
 
     def _refresh_breakdown(self, section: dict, rows: list, singular: str, plural: str):
         grand_total = sum(r["minutes"] for r in rows)

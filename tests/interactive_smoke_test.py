@@ -70,7 +70,23 @@ db = win.db
 
 print("\n--- Initial state ---")
 activities = db.list_activities()
-check("4 default activities seeded", len(activities) == 4)
+check("Fresh database has no placeholder QDMs", len(activities) == 0)
+
+# The rest of this script exercises real activity/calendar paths, so add
+# a handful of local test QDMs (not the old first-run demo seed).
+test_project_id = db.add_project(Project(None, "Test Work", cfg.DEFAULT_PROJECT_COLORS[0]))
+client_id = db.add_project(Project(None, "Client Alpha", cfg.DEFAULT_PROJECT_COLORS[3]))
+for name, jira_key, dur, project_id in (
+        ("Sprint Planning", None, 60, test_project_id),
+        ("Team Standup", None, 15, test_project_id),
+        ("Code Review", None, 30, test_project_id),
+        ("Development", "QDM-100", 120, client_id),
+):
+    db.add_activity(Activity(None, name, jira_key, dur, project_id=project_id))
+sb.refresh()
+win.update()
+activities = db.list_activities()
+check("Test activities are available for the rest of this script", len(activities) == 4)
 check("Calendar starts with 0 entries this week", len(cal.entries_by_id) == 0)
 
 print("\n--- Quick-assign (arm + click empty slot) ---")

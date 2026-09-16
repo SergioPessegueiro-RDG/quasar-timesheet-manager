@@ -191,7 +191,7 @@ class Database:
         self._migrate_schema()
         self._backfill_project_colors_from_legacy_activities()
         self._ensure_activities_have_projects()
-        self._seed_defaults_if_empty()
+        self._remove_demo_seed_qdms()
 
     def _migrate_legacy_activity_naming(self):
         """Step 1 -> step 2: the original "Activities"/"Activity Folders"
@@ -440,24 +440,40 @@ class Database:
         self._init_schema()
 
     # ------------------------------------------------------------------
-    # Seed data (first run only)
+    # Remove the old first-run demo QDMs (Sprint Planning, Team Standup,
+    # Code Review, Development under General / Client Alpha). Those were
+    # sample rows, not real Jira issues, and they came back whenever the
+    # activities table was empty. Real QDMs arrive from Jira sync or the
+    # Add QDM tab; General is still created on demand as a catch-all when
+    # a project is deleted or an activity is orphaned.
     # ------------------------------------------------------------------
-    def _seed_defaults_if_empty(self):
-        with self._cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS c FROM activities")
-            count = cur.fetchone()["c"]
-        if count > 0:
+    _DEMO_SEED_ACTIVITY_NAMES = frozenset({
+        "Sprint Planning", "Team Standup", "Code Review", "Development",
+    })
+    _DEMO_SEED_JIRA_KEYS = frozenset({"", "PROJ-100"})
+    _DEMO_SEED_PROJECT_NAMES = frozenset({"General", "Client Alpha"})
+    _REMOVED_DEMO_SEED_SETTING = "removed_demo_seed_qdms"
+
+    def _remove_demo_seed_qdms(self):
+        if self.get_setting(self._REMOVED_DEMO_SEED_SETTING, "0") == "1":
             return
-        general_id = self.add_project(Project(None, "General", config.DEFAULT_PROJECT_COLORS[0]))
-        client_id = self.add_project(Project(None, "Client Alpha", config.DEFAULT_PROJECT_COLORS[3]))
-        defaults = [
-            ("Sprint Planning", None, 60, general_id),
-            ("Team Standup", None, 15, general_id),
-            ("Code Review", None, 30, general_id),
-            ("Development", "PROJ-100", 120, client_id),
-        ]
-        for name, jira_key, dur, project_id in defaults:
-            self.add_activity(Activity(None, name, jira_key, dur, project_id=project_id))
+        for activity in self.list_activities(include_archived=True):
+            key = (activity.jira_key or "").strip()
+            if (activity.name in self._DEMO_SEED_ACTIVITY_NAMES
+                    and key in self._DEMO_SEED_JIRA_KEYS):
+                self.delete_activity(activity.id, delete_entries=False)
+        for project in self.list_projects():
+            if project.name not in self._DEMO_SEED_PROJECT_NAMES:
+                continue
+            with self._cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) AS c FROM activities WHERE project_id=?",
+                    (project.id,),
+                )
+                remaining = cur.fetchone()["c"]
+            if remaining == 0:
+                self.delete_project(project.id)
+        self.set_setting(self._REMOVED_DEMO_SEED_SETTING, "1")
 
     # ------------------------------------------------------------------
     # Projects (collapsible groups in the sidebar; every Activity belongs

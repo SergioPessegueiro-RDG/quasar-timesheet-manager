@@ -319,6 +319,9 @@ class TestRoundedWidgets(unittest.TestCase):
                 self.assertGreater(int(jira_btn.cget("width")), 40)
                 play = RoundedButton(root, text="Start Timer", style="Accent.TButton", icon="play")
                 self.assertEqual(play._icon, "play")
+                gear = RoundedButton(root, text="", style="Ghost.TButton", icon="gear")
+                self.assertEqual(gear._icon, "gear")
+                self.assertGreater(int(gear.cget("width")), 10)
                 quiet = RoundedButton(root, text="Template", style="Quiet.TButton")
                 self.assertEqual(quiet.cget("style"), "Quiet.TButton")
                 from app.widgets import segmented_button_style
@@ -333,6 +336,55 @@ class TestRoundedWidgets(unittest.TestCase):
                 _hex_bg_at(root, 0, 0, "#3AAFA9", ignore=root).upper(), "#3AAFA9")
         finally:
             root.destroy()
+
+
+class TestAppIcon(unittest.TestCase):
+    def test_both_logo_pngs_are_bundled(self):
+        dark = theme._logo_asset_path(theme.APP_ICON_DARK)
+        light = theme._logo_asset_path(theme.APP_ICON_LIGHT)
+        self.assertTrue(os.path.isfile(dark), dark)
+        self.assertTrue(os.path.isfile(light), light)
+        self.assertTrue(dark.endswith("logo.png"))
+        self.assertTrue(light.endswith("logo_light.png"))
+        self.assertTrue(os.path.isfile(theme._app_icon_path(theme.APP_ICON_DARK)))
+        self.assertTrue(os.path.isfile(theme._app_icon_path(theme.APP_ICON_LIGHT)))
+
+    def test_auto_follows_light_and_dark_themes(self):
+        previous_theme = theme.get_theme_id()
+        previous_mode = theme.get_app_icon_mode()
+        try:
+            theme.set_app_icon_mode(theme.APP_ICON_AUTO)
+            theme.set_theme(theme.WHITE_THEME_ID)
+            self.assertFalse(theme.theme_is_dark())
+            self.assertEqual(theme.resolved_app_icon_variant(), theme.APP_ICON_LIGHT)
+            self.assertTrue(theme._logo_asset_path().endswith("logo_light.png"))
+            theme.set_theme(theme.DARK_MODE_THEME_ID)
+            self.assertTrue(theme.theme_is_dark())
+            self.assertEqual(theme.resolved_app_icon_variant(), theme.APP_ICON_DARK)
+            self.assertTrue(theme._logo_asset_path().endswith("logo.png"))
+        finally:
+            theme.set_theme(previous_theme)
+            theme.set_app_icon_mode(previous_mode)
+
+    def test_pinned_light_icon_ignores_dark_theme(self):
+        previous_theme = theme.get_theme_id()
+        previous_mode = theme.get_app_icon_mode()
+        try:
+            theme.set_theme(theme.DARK_MODE_THEME_ID)
+            theme.set_app_icon_mode(theme.APP_ICON_LIGHT)
+            self.assertEqual(theme.resolved_app_icon_variant(), theme.APP_ICON_LIGHT)
+            self.assertTrue(theme._logo_asset_path().endswith("logo_light.png"))
+            theme.set_app_icon_mode(theme.APP_ICON_DARK)
+            theme.set_theme(theme.WHITE_THEME_ID)
+            self.assertEqual(theme.resolved_app_icon_variant(), theme.APP_ICON_DARK)
+            self.assertTrue(theme._logo_asset_path().endswith("logo.png"))
+        finally:
+            theme.set_theme(previous_theme)
+            theme.set_app_icon_mode(previous_mode)
+
+    def test_unknown_mode_falls_back_to_auto(self):
+        self.assertEqual(theme.resolve_app_icon_mode("nope"), theme.APP_ICON_AUTO)
+        self.assertEqual(theme.resolve_app_icon_mode(None), theme.APP_ICON_AUTO)
 
 
 class TestLogoMark(unittest.TestCase):

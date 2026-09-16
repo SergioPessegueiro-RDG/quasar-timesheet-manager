@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Turns packaging/icons/source.png into the committed app-icon files.
+Turns packaging/icons/source.png (and optional whitevariant.png) into
+the committed app-icon files.
 
-The in-window header loads app/assets/logo.png (see theme.draw_logo_mark).
-The Dock / .exe / Linux icon uses icon.png + icon.ico + icon.icns.
-app/assets/app_icon.png is the full-bleed mark (no extra frame). Packaged
-Mac builds use the .icns; running from source fills the Dock tile so
-macOS clips it to the system squircle.
+The in-window header loads app/assets/logo.png or logo_light.png
+(see theme.draw_logo_mark). The Dock / .exe / Linux installer icon uses
+icon.png + icon.ico + icon.icns from source.png. app/assets/app_icon.png
+is the full-bleed dark mark; app_icon_light.png is the white-background
+variant. Packaged Mac builds use the .icns as the Finder icon; the
+running app can swap the header / Dock glyph between the two.
 
-Replace source.png with a new square PNG, then:
+Replace source.png (dark / full-bleed) and optionally whitevariant.png
+(light / white background), then:
 
     python3 packaging/make_icons.py
 
@@ -27,8 +30,11 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(HERE, "icons")
 SOURCE = os.path.join(OUT_DIR, "source.png")
+SOURCE_LIGHT = os.path.join(OUT_DIR, "whitevariant.png")
 HEADER_LOGO = os.path.join(HERE, "..", "app", "assets", "logo.png")
+HEADER_LOGO_LIGHT = os.path.join(HERE, "..", "app", "assets", "logo_light.png")
 APP_ICON = os.path.join(HERE, "..", "app", "assets", "app_icon.png")
+APP_ICON_LIGHT = os.path.join(HERE, "..", "app", "assets", "app_icon_light.png")
 VENV_DIR = os.path.join(HERE, ".icons-venv")
 
 
@@ -146,6 +152,14 @@ def main():
     print(f"Wrote icon.png, icon.ico, icon.icns to {OUT_DIR}")
     print(f"Wrote header logo to {os.path.normpath(HEADER_LOGO)}")
     print(f"Wrote Dock icon to {os.path.normpath(APP_ICON)}")
+
+    if os.path.isfile(SOURCE_LIGHT):
+        _square_rgba(SOURCE_LIGHT, 128).save(HEADER_LOGO_LIGHT)
+        _square_rgba(SOURCE_LIGHT, 512).save(APP_ICON_LIGHT)
+        print(f"Wrote light header logo to {os.path.normpath(HEADER_LOGO_LIGHT)}")
+        print(f"Wrote light Dock icon to {os.path.normpath(APP_ICON_LIGHT)}")
+    else:
+        print(f"No {SOURCE_LIGHT} -- skipped light-variant logos")
 
 
 if __name__ == "__main__":

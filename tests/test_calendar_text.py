@@ -5,7 +5,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.calendar_view import wrap_block_text
+from app.calendar_view import wrap_block_text, _unsent_label_reserve
 from app.models import TimeEntry
 from app.calendar_view import CalendarGrid
 
@@ -26,6 +26,16 @@ class TestWrapBlockText(unittest.TestCase):
 
     def test_splits_a_token_longer_than_the_line(self):
         self.assertEqual(wrap_block_text("abcdefghij", 4), ["abcd", "efgh", "ij"])
+
+
+class TestUnsentLabelReserve(unittest.TestCase):
+    def test_fifteen_minute_slot_does_not_stack_the_caption(self):
+        self.assertEqual(_unsent_label_reserve(22), 0)
+        self.assertEqual(_unsent_label_reserve(31), 0)
+
+    def test_taller_blocks_keep_a_caption_row(self):
+        self.assertEqual(_unsent_label_reserve(32), 16)
+        self.assertEqual(_unsent_label_reserve(60), 16)
 
 
 class TestEntryTextLinesWrap(unittest.TestCase):

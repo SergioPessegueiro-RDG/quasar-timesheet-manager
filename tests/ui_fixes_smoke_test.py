@@ -92,9 +92,9 @@ check("Duplicate tab becomes visible and selected",
 
 win._open_settings_dialog()
 win.update()
-# Settings is a permanent tab now (like Timesheet/Template/Summary), not
-# one of the hide-until-opened panels _show_panel manages -- opening it
-# just selects it, and doesn't hide whatever other single extra panel
+# Settings is a permanent notebook tab, opened from the Settings chip
+# (not the left-hand Timesheet/Template/Summary strip). Opening it just
+# selects it, and doesn't hide whatever other single extra panel
 # (Duplicate, here) happened to be open.
 check("Opening Settings does not hide the still-open Duplicate tab (Settings isn't part of that single-extra-tab mechanism)",
       str(win.notebook.tab(win.duplicate_panel, "state")) == "normal")
@@ -157,6 +157,8 @@ check("Calendar day columns still get most of the extra space (day_width > MIN)"
 # The activity rows inside the sidebar's scrollable list should stretch to
 # the sidebar's own width too (this was the literal "doesn't fit into the
 # box" bug -- row highlight backgrounds stopping short of the right edge).
+stretch_pid = win.sidebar.db.add_project(Project(None, "Stretch Project", "#4C6EF5"))
+win.sidebar.db.add_activity(Activity(None, "Stretch Activity", None, 30, project_id=stretch_pid))
 win.sidebar._activities = win.sidebar.db.list_activities()
 win.sidebar._projects = win.sidebar.db.list_projects()
 win.sidebar._render_rows()

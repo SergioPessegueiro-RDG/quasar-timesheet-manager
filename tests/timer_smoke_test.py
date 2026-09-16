@@ -109,11 +109,17 @@ print("--- Timer bar exists and its activity picker is populated ---")
 check("MainWindow has a timer_bar", hasattr(win, "timer_bar"))
 tb = win.timer_bar
 check("Timer starts idle", not tb.is_running())
+check("Picker shows Select a QDM until one is chosen",
+      tb.activity_var.get() == "Select a QDM…")
+check("Start Timer is disabled until a QDM is chosen",
+      tb.toggle_btn.cget("state") == "disabled")
 values = list(tb.activity_combo.cget("values"))
 check("Activity picker lists both seeded activities", "Deep Work" in values and "Standup" in values)
 
 print("\n--- Starting without picking an activity warns and doesn't start ---")
 tb.activity_var.set("")
+check("Start stays disabled with an empty picker",
+      tb.toggle_btn.cget("state") == "disabled")
 warnings.clear()
 tb._start()
 check("A warning was shown", len(warnings) == 1)
@@ -122,6 +128,8 @@ check("Timer did not start", not tb.is_running())
 print("\n--- Start -> Stop asks for a description before logging ---")
 tb.activity_var.set("Deep Work")
 tb.activity_combo.set("Deep Work")
+check("Start enables once a QDM is chosen",
+      tb.toggle_btn.cget("state") == "normal")
 t0 = _Clock.now
 tb._start()
 check("Timer is running after Start", tb.is_running())

@@ -445,13 +445,13 @@ def push_button_state(
 ) -> tuple:
     """Label + button style for the week Push control.
 
-    Quiet "Synced" until something local still needs sending; then an
-    accent "Push Nh" (or plain "Push to Jira" if the only outstanding
-    work is a delete with no remaining minutes).
+    Quiet "Synced" as a non-action status until something local still
+    needs sending; then an accent "Push Nh" (or plain "Push to Jira" if
+    the only outstanding work is a delete with no remaining minutes).
     """
     count, minutes = unsent_worklog_totals(entries, pending_deletes)
     if count == 0:
-        return "Synced", "Ghost.TButton"
+        return "Synced", "Quiet.TButton"
     if minutes > 0:
         return f"Push {minutes / 60:.1f}h", "Accent.TButton"
     return "Push to Jira", "Accent.TButton"

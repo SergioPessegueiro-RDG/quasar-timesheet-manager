@@ -404,7 +404,7 @@ class TimeBlockPanel(tk.Frame):
 
         activity_names, activity_hays, activity_labels = qdm_combo_rows(activities)
         if not activity_names:
-            activity_names = ["(no QDM's yet)"]
+            activity_names = ["(no QDMs yet)"]
             activity_hays = [""]
             activity_labels = activity_names
         self.activity_combo.config(

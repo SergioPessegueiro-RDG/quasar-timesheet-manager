@@ -673,6 +673,10 @@ class SettingsPanel(tk.Frame):
         self.custom_controls_frame: Optional[tk.Frame] = None
         self.glass_alpha_frame: Optional[tk.Frame] = None
         self._glass_alpha_on_load = theme.get_glass_alpha()
+        self.app_icon_frame: Optional[tk.Frame] = None
+        self.app_icon_canvases: Dict[str, tk.Canvas] = {}
+        self.app_icon_choice = theme.get_app_icon_mode()
+        self._app_icon_on_load = self.app_icon_choice
 
         body = _scroll_body(self)
         outer = tk.Frame(body, bg=theme.PANEL_BG)
@@ -731,7 +735,7 @@ class SettingsPanel(tk.Frame):
             jira_card,
             "Paste an API token from your Atlassian account. "
             "Site URL can be https://your-company.atlassian.net or any "
-            "dashboard / board link — extra path is stripped. Sync pulls "
+            "dashboard / board link — extra path is stripped. Refresh pulls "
             "open QDMs assigned to you. Your display name comes from Jira "
             "when you test the connection (CSV export only). The token "
             "never leaves this machine.",
@@ -780,7 +784,7 @@ class SettingsPanel(tk.Frame):
         jira_btns.grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 4))
         RoundedButton(jira_btns, text="Test connection", style="Secondary.TButton",
                       command=self._test_jira, bg=theme.SURFACE).pack(side="left")
-        RoundedButton(jira_btns, text="Sync QDMs now", style="Accent.TButton",
+        RoundedButton(jira_btns, text="Refresh QDMs now", style="Accent.TButton",
                       command=self._sync_jira, bg=theme.SURFACE).pack(side="left", padx=(8, 0))
         RoundedButton(jira_btns, text="Welcome setup…", style="Secondary.TButton",
                       command=self._open_welcome, bg=theme.SURFACE).pack(side="left", padx=(8, 0))
@@ -922,6 +926,10 @@ class SettingsPanel(tk.Frame):
         self.glass_alpha_frame.grid(row=4, column=0, columnspan=2, sticky="ew")
         theme_card.columnconfigure(0, weight=1)
         self._build_glass_alpha_controls()
+
+        self.app_icon_frame = tk.Frame(theme_card, bg=theme.SURFACE)
+        self.app_icon_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(20, 0))
+        self._build_app_icon_controls()
 
         shortcuts_card = RoundedCard(right, bg=theme.SURFACE, radius=14, outline=False, shrink=True)
         shortcuts_card.grid(row=0, column=0, sticky="ew")
@@ -1191,6 +1199,90 @@ class SettingsPanel(tk.Frame):
         self.glass_alpha_slider.pack(fill="x", pady=(4, 0))
         self._sync_glass_alpha_label(theme.get_glass_alpha())
 
+    def _build_app_icon_controls(self):
+        tk.Label(self.app_icon_frame, text="App icon",
+                 font=(self.family, 10, "bold"), bg=self._card_bg,
+                 fg=theme.TEXT_PRIMARY).pack(anchor="w")
+        tk.Label(self.app_icon_frame,
+                 text="Auto follows the theme: light palettes use the white-background "
+                      "mark, dark palettes use the full-bleed mark. Or pin one for every theme.",
+                 fg=theme.TEXT_MUTED, bg=self._card_bg, justify="left", wraplength=480,
+                 font=(self.family, 9)).pack(anchor="w", pady=(2, 8))
+        row = tk.Frame(self.app_icon_frame, bg=self._card_bg)
+        row.pack(anchor="w")
+        captions = (
+            (theme.APP_ICON_AUTO, "Auto"),
+            (theme.APP_ICON_DARK, "Dark"),
+            (theme.APP_ICON_LIGHT, "Light"),
+        )
+        for mode, caption in captions:
+            cell = tk.Frame(row, bg=self._card_bg)
+            cell.pack(side="left", padx=(0, 12))
+            canvas = tk.Canvas(cell, width=108, height=80, bg=self._card_bg,
+                                highlightthickness=0, cursor="hand2")
+            canvas.pack()
+            canvas.bind("<Button-1>", lambda e, m=mode: self._select_app_icon(m))
+            self.app_icon_canvases[mode] = canvas
+            label = tk.Label(cell, text=caption, font=(self.family, 9),
+                              bg=self._card_bg, fg=theme.TEXT_PRIMARY, cursor="hand2")
+            label.pack(pady=(4, 0))
+            label.bind("<Button-1>", lambda e, m=mode: self._select_app_icon(m))
+        self._refresh_app_icon_selection()
+
+    def _select_app_icon(self, mode: str):
+        self.app_icon_choice = theme.set_app_icon_mode(mode)
+        self._refresh_app_icon_selection()
+        root = self.winfo_toplevel()
+        apply = getattr(root, "_apply_app_icon", None)
+        if callable(apply):
+            try:
+                apply()
+            except tk.TclError:
+                pass
+        redraw = getattr(root, "_redraw_header_logo", None)
+        if callable(redraw):
+            try:
+                redraw()
+            except tk.TclError:
+                pass
+
+    def _refresh_app_icon_selection(self):
+        selected = self.app_icon_choice
+        for mode, canvas in list(self.app_icon_canvases.items()):
+            try:
+                if not canvas.winfo_exists():
+                    continue
+            except tk.TclError:
+                continue
+            self._draw_app_icon_swatch(canvas, mode, selected=(mode == selected))
+
+    def _draw_app_icon_swatch(self, canvas, mode: str, selected: bool):
+        try:
+            canvas.delete("all")
+        except tk.TclError:
+            return
+        width, height = 108, 80
+        outline = theme.ACCENT if selected else theme.BORDER_STRONG
+        stroke = 3 if selected else 1
+        theme.place_rounded_rect(
+            canvas, 1, 1, width - 1, height - 1, radius=10,
+            fill=theme.PANEL_BG, outline=outline, width=stroke,
+            background=self._card_bg)
+        photos = []
+        if mode == theme.APP_ICON_AUTO:
+            for variant, x in ((theme.APP_ICON_DARK, 36), (theme.APP_ICON_LIGHT, 72)):
+                photo = theme.load_logo_photo(36, variant=variant)
+                if photo is None:
+                    continue
+                photos.append(photo)
+                canvas.create_image(x, 40, image=photo, anchor="center")
+        else:
+            photo = theme.load_logo_photo(52, variant=mode)
+            if photo is not None:
+                photos.append(photo)
+                canvas.create_image(width // 2, 40, image=photo, anchor="center")
+        canvas._icon_photos = photos
+
     def _sync_glass_alpha_label(self, alpha: float):
         self.glass_alpha_label.config(text=f"{alpha * 100:.1f}% opaque")
 
@@ -1270,7 +1362,7 @@ class SettingsPanel(tk.Frame):
         self.jira_token_var.set(jira_api_token)
         self.jira_project_key_var.set(jira_project_key or "QDM")
         if jira_api_token:
-            self.jira_status_label.config(text="Token saved locally. Test the connection, then Sync QDMs.")
+            self.jira_status_label.config(text="Token saved locally. Test the connection, then Refresh QDMs.")
         else:
             self.jira_status_label.config(text="No token yet — paste one above, or set QUASAR_JIRA_TOKEN.")
         urls = list(calendar_ics_urls or [])
@@ -1292,6 +1384,9 @@ class SettingsPanel(tk.Frame):
         if hasattr(self, "glass_alpha_slider"):
             self.glass_alpha_slider.set(self._glass_alpha_on_load * 100)
             self._sync_glass_alpha_label(self._glass_alpha_on_load)
+        self.app_icon_choice = theme.get_app_icon_mode()
+        self._app_icon_on_load = self.app_icon_choice
+        self._refresh_app_icon_selection()
         self._refresh_theme_selection()
 
         start_idx = self._start_hour_values.index(work_start_hour) if work_start_hour in self._start_hour_values else 9
@@ -1339,6 +1434,15 @@ class SettingsPanel(tk.Frame):
                 theme.apply_window_opacity(self.winfo_toplevel())
             except tk.TclError:
                 pass
+        if theme.get_app_icon_mode() != self._app_icon_on_load:
+            theme.set_app_icon_mode(self._app_icon_on_load)
+            root = self.winfo_toplevel()
+            apply = getattr(root, "_apply_app_icon", None)
+            if callable(apply):
+                apply()
+            redraw = getattr(root, "_redraw_header_logo", None)
+            if callable(redraw):
+                redraw()
         self.on_close()
 
 

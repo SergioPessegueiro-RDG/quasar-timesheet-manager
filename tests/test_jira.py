@@ -352,7 +352,7 @@ class TestPushWorklogs(unittest.TestCase):
         self.assertEqual(jira_sync.unsent_worklog_totals([entry]), (0, 0))
         self.assertEqual(
             jira_sync.push_button_state([entry]),
-            ("Synced", "Ghost.TButton"))
+            ("Synced", "Quiet.TButton"))
 
     def test_edited_synced_block_is_unsent_again(self):
         self._mark_synced()

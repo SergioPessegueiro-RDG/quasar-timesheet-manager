@@ -3,6 +3,7 @@ arming, organized into collapsible Projects. Every Activity belongs to
 exactly one Project -- there's no "ungrouped" state -- since a time block's
 color always comes from its Activity's Project (see app/models.py)."""
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import messagebox
 from typing import Callable, Dict, List, Optional
 
@@ -87,6 +88,8 @@ class Sidebar(tk.Frame):
         self._projects: List[Project] = []
         self._sidebar_px = content_width or config.DEFAULT_SIDEBAR_WIDTH_PX
         self._name_labels: List[tk.Label] = []
+        self._ellipsis_labels: List[tk.Label] = []
+        self._name_tip = None
         self._calendar = None
         self._row_press: Optional[dict] = None
         self._arm_job = None
@@ -117,7 +120,7 @@ class Sidebar(tk.Frame):
 
         if self.collapsed:
             # A narrow icon rail instead of the full card: a round expand
-            # button, a rotated "QDM's" label so it's obvious what's
+            # button, a rotated "QDMs" label so it's obvious what's
             # hidden, then one small color dot per Project (no
             # Activities, no scrolling) as a quick visual reminder of
             # what's hidden. self.list_frame still exists here (holding
@@ -156,7 +159,7 @@ class Sidebar(tk.Frame):
             # little breathing room either side.
             label_canvas = tk.Canvas(inner, width=22, height=74, bg=theme.PANEL_BG,
                                       highlightthickness=0, cursor="hand2")
-            label_canvas.create_text(11, 37, text="QDM's", angle=90,
+            label_canvas.create_text(11, 37, text="QDMs", angle=90,
                                       fill=theme.TEXT_SECONDARY,
                                       font=(self.family, 10, "bold"))
             label_canvas.pack(pady=(0, 12))
@@ -170,13 +173,13 @@ class Sidebar(tk.Frame):
         else:
             header = tk.Frame(inner, bg=theme.PANEL_BG)
             header.pack(fill="x", pady=(0, 8))
-            tk.Label(header, text="QDM's", font=(self.family, 13, "bold"),
+            tk.Label(header, text="QDMs", font=(self.family, 13, "bold"),
                      bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY).pack(side="left")
             if self.on_toggle_collapse is not None:
                 RoundedButton(header, text="«", width=3, style="Nav.TButton", compact=True,
                               command=self.on_toggle_collapse).pack(side="right")
             if self.on_jira_sync is not None:
-                RoundedButton(header, text="Sync", style="Ghost.TButton",
+                RoundedButton(header, text="Refresh QDMs", style="Ghost.TButton",
                               command=self.on_jira_sync).pack(side="right", padx=(0, 6))
 
             search_row = tk.Frame(inner, bg=theme.PANEL_BG)
@@ -348,7 +351,7 @@ class Sidebar(tk.Frame):
         self._render_rows()
 
     def set_content_width(self, sidebar_px: int):
-        """Keep QDM names wrapping to the current sash width without
+        """Keep QDM names fitting the current sash width without
         rebuilding every row on each drag pixel."""
         if self.collapsed:
             return
@@ -358,13 +361,14 @@ class Sidebar(tk.Frame):
         self._sidebar_px = sidebar_px
         for lbl in self._name_labels:
             self._sync_wraplength(lbl)
+        for lbl in self._ellipsis_labels:
+            self._sync_ellipsis(lbl)
 
     def _name_wraplength(self, extra_chrome: int = 0) -> int:
         return max(60, int(self._sidebar_px) - _NAME_WRAP_CHROME_PX - extra_chrome)
 
     def _attach_wraplength(self, lbl: tk.Label, extra_chrome: int = 0):
-        """Wrap to the label's allocated width so the count/arrow/dot on
-        the same row cannot clip the last letters of a long name."""
+        """Wrap instructional empty-state copy to the column width."""
         lbl.configure(wraplength=self._name_wraplength(extra_chrome))
         lbl.bind("<Configure>", lambda e, widget=lbl: self._sync_wraplength(widget, e.width))
         self._name_labels.append(lbl)
@@ -385,8 +389,92 @@ class Sidebar(tk.Frame):
             except tk.TclError:
                 pass
 
+    def _ellipsis_text(self, full: str, font: tkfont.Font, max_px: int) -> str:
+        if max_px <= 16 or font.measure(full) <= max_px:
+            return full
+        ell = "…"
+        lo, hi = 0, len(full)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if font.measure(full[:mid].rstrip() + ell) <= max_px:
+                lo = mid
+            else:
+                hi = mid - 1
+        return (full[:lo].rstrip() + ell) if lo else ell
+
+    def _attach_ellipsis(self, lbl: tk.Label, full_text: str):
+        """Single-line name: ellipsize to the allocated width, full text on hover."""
+        lbl._full_text = full_text
+        lbl.bind("<Configure>", lambda e, widget=lbl: self._sync_ellipsis(widget, e.width))
+        lbl.bind("<Enter>", lambda e, widget=lbl: self._maybe_show_name_tip(widget))
+        lbl.bind("<Leave>", lambda e: self._hide_name_tip())
+        self._ellipsis_labels.append(lbl)
+
+    def _sync_ellipsis(self, lbl: tk.Label, width: Optional[int] = None):
+        full = getattr(lbl, "_full_text", None)
+        if not full:
+            return
+        try:
+            allocated = int(width) if width else int(lbl.winfo_width())
+        except tk.TclError:
+            return
+        max_px = max(24, allocated - 2) if allocated > 1 else self._name_wraplength()
+        try:
+            font = tkfont.Font(font=lbl.cget("font"))
+        except tk.TclError:
+            return
+        fitted = self._ellipsis_text(full, font, max_px)
+        if lbl.cget("text") != fitted:
+            try:
+                lbl.configure(text=fitted)
+            except tk.TclError:
+                pass
+
+    def _maybe_show_name_tip(self, widget):
+        full = getattr(widget, "_full_text", "") or ""
+        try:
+            shown = widget.cget("text")
+        except tk.TclError:
+            return
+        if not full or shown == full:
+            return
+        self._show_name_tip(widget, full)
+
+    def _show_name_tip(self, widget, text: str):
+        self._hide_name_tip()
+        try:
+            tip = tk.Toplevel(widget)
+            tip.wm_overrideredirect(True)
+            try:
+                tip.wm_attributes("-topmost", True)
+            except tk.TclError:
+                pass
+            tk.Label(
+                tip, text=text, bg=theme.SURFACE, fg=theme.TEXT_PRIMARY,
+                font=(self.family, 10), padx=8, pady=5, justify="left",
+                wraplength=360,
+            ).pack()
+            tip.update_idletasks()
+            x = widget.winfo_rootx()
+            y = widget.winfo_rooty() + widget.winfo_height() + 6
+            tip.geometry(f"+{x}+{y}")
+            self._name_tip = tip
+        except tk.TclError:
+            self._name_tip = None
+
+    def _hide_name_tip(self):
+        tip = self._name_tip
+        self._name_tip = None
+        if tip is not None:
+            try:
+                tip.destroy()
+            except tk.TclError:
+                pass
+
     def _render_rows(self):
+        self._hide_name_tip()
         self._name_labels = []
+        self._ellipsis_labels = []
         self._filter_items = []
         self._empty_search = None
         for child in self.list_frame.winfo_children():
@@ -403,7 +491,7 @@ class Sidebar(tk.Frame):
         self._rows_include_collapsed_children = False
 
         if not self._activities or not any(not a.is_closed() for a in self._activities):
-            empty = tk.Label(self.list_frame, text="No QDM's yet. Sync from Jira, or File → New QDM.",
+            empty = tk.Label(self.list_frame, text="No QDMs yet. Refresh from Jira, or File → New QDM.",
                       fg=theme.TEXT_MUTED, bg=theme.PANEL_BG,
                       font=(self.family, 9), justify="left")
             empty.pack(pady=14, padx=8)
@@ -477,7 +565,7 @@ class Sidebar(tk.Frame):
         """Collapsed mode's whole "list": one small color dot per Project,
         no Activities -- just enough to remember what's hidden while the
         rail is narrow. Clicking any dot re-expands, same as the round
-        button and "QDM's" label above it (and the rest of the rail)."""
+        button and "QDMs" label above it (and the rest of the rail)."""
         for project in self._projects:
             if not any(a.project_id == project.id and not a.is_closed()
                        for a in self._activities):
@@ -535,9 +623,9 @@ class Sidebar(tk.Frame):
         font_style = f"{weight} {slant}".strip()
         name_lbl = tk.Label(
             top_line, text=act.name, bg=row_bg, fg=name_fg, anchor="w",
-            justify="left", font=(self.family, 10, font_style))
+            justify="left", font=(self.family, 10, font_style), width=1)
         name_lbl.pack(side="left", fill="x", expand=True)
-        self._attach_wraplength(name_lbl)
+        self._attach_ellipsis(name_lbl, act.name)
         if closed:
             badge = tk.Label(
                 top_line, text=(act.jira_status or "Closed").upper(),
@@ -559,9 +647,9 @@ class Sidebar(tk.Frame):
         if meta_bits:
             meta_lbl = tk.Label(content, text="   ·   ".join(meta_bits), bg=row_bg,
                      fg=theme.TEXT_MUTED if closed else theme.TEXT_SECONDARY,
-                     anchor="w", justify="left", font=(self.family, 8))
+                     anchor="w", justify="left", font=(self.family, 8), width=1)
             meta_lbl.pack(fill="x", pady=(2, 0))
-            self._attach_wraplength(meta_lbl)
+            self._attach_ellipsis(meta_lbl, "   ·   ".join(meta_bits))
 
         def bind_all(widget):
             widget.bind("<ButtonPress-1>", lambda e, a=act: self._on_qdm_press(e, a))
@@ -701,12 +789,9 @@ class Sidebar(tk.Frame):
             count_lbl.pack(side="right", padx=(6, 0), anchor="n")
         name_lbl = tk.Label(
             content, text=project.name, bg=theme.HEADER_BG, fg=theme.TEXT_PRIMARY,
-            anchor="w", justify="left", font=(self.family, 10, "bold"))
+            anchor="w", justify="left", font=(self.family, 10, "bold"), width=1)
         name_lbl.pack(side="left", fill="x", expand=True)
-        # Arrow + swatch + "(4)" live on this row, so the first wraplength
-        # guess has to leave room for them; <Configure> then tightens to
-        # the label's real allocated width.
-        self._attach_wraplength(name_lbl, extra_chrome=56)
+        self._attach_ellipsis(name_lbl, project.name)
 
         def bind_edit_and_menu(widget):
             widget.bind("<Double-Button-1>", lambda e, p=project: self._edit_project(p))
@@ -775,10 +860,10 @@ class Sidebar(tk.Frame):
     def _add_activity(self):
         if not self._projects:
             # ActivityPanel's Project dropdown needs at least one option --
-            # this only happens if every Project was ever deleted along
-            # with its Activities, since a fresh install always seeds a
-            # couple and deleting a Project otherwise falls back to
-            # "General" rather than leaving zero.
+            # this only happens if every Project was deleted along with
+            # its Activities (a fresh install starts empty; deleting a
+            # Project otherwise falls back to "General" rather than
+            # leaving zero).
             self.db.get_or_create_general_project()
             self._projects = self.db.list_projects()
 

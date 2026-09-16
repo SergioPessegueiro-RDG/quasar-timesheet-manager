@@ -143,6 +143,33 @@ class TestUnsentMarker(unittest.TestCase):
         self.cal.refresh()
         self.assertFalse(self.cal.canvas.find_withtag("unsent"))
 
+    def test_short_unsent_block_does_not_overlap_the_title(self):
+        # 15 minutes at 1.5 px/min is ~22px — below the stacked-caption
+        # threshold, which is how a 15-minute slot looks at typical zoom.
+        self.cal.px_per_min = 1.5
+        self.cal.day_width = 180
+        self.db.add_time_entry(TimeEntry(
+            None, self.act.id, "India - database rebuild", self.act.jira_key,
+            self.act.color, self.cal.day_date(0).isoformat(), "09:00", "09:15",
+            "notes"))
+        self.cal.refresh()
+        unsent = [i for i in self.cal.canvas.find_withtag("unsent")
+                  if self.cal.canvas.type(i) == "text"]
+        titles = [i for i in self.cal.canvas.find_withtag("entry_text")
+                  if self.cal.canvas.type(i) == "text"]
+        self.assertTrue(unsent, "short unsent blocks still show a caption")
+        self.assertTrue(titles, "short unsent blocks still show the QDM name")
+        caption = self.cal.canvas.bbox(unsent[0])
+        title = self.cal.canvas.bbox(titles[0])
+        self.assertIsNotNone(caption)
+        self.assertIsNotNone(title)
+        # Same line, title on the left, caption on the right — boxes
+        # must not occupy the same pixels.
+        self.assertLessEqual(title[2], caption[0] + 1, (title, caption))
+        self.assertTrue(
+            any("synced" in self.cal.canvas.itemcget(i, "text").lower()
+                for i in unsent))
+
 
 if __name__ == "__main__":
     unittest.main()

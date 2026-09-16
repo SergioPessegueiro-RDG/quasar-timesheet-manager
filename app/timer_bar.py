@@ -24,6 +24,9 @@ from .time_rounding import round_duration_minutes
 from .widgets import RoundedButton, RoundedCombobox
 
 
+_TIMER_PLACEHOLDER = "Select a QDM…"
+
+
 class TimerBar(tk.Frame):
     def __init__(self, master, db: Database, get_activities: Callable[[], List[Activity]],
                  on_saved: Callable[[TimeEntry], None], family: str,
@@ -48,11 +51,11 @@ class TimerBar(tk.Frame):
         inner.pack(fill="x")
 
         self.activity_var = tk.StringVar()
-        # Closed width hugs the empty prompt. The open list still grows to
-        # the longest QDM name; a long selection ellipsizes in the field
+        # Wide enough to read a real QDM name; the open list still grows
+        # to the longest one. A long selection ellipsizes in the field
         # instead of stretching the header and shoving Start Timer.
         self.activity_combo = RoundedCombobox(inner, textvariable=self.activity_var,
-                                               state="readonly", width=6, bg=bg,
+                                               state="readonly", width=18, bg=bg,
                                                filterable=True)
         self.activity_combo.pack(side="left", padx=(0, 8))
 
@@ -62,6 +65,7 @@ class TimerBar(tk.Frame):
         self.toggle_btn = RoundedButton(inner, text="Start Timer", style="Accent.TButton",
                                          command=self._toggle, bg=bg, width=11, icon="play")
         self.toggle_btn.pack(side="left")
+        self.activity_var.trace_add("write", lambda *_: self._sync_start_enabled())
 
         # A small drawn dot rather than a colored emoji/glyph for the
         # "recording" indicator -- same reasoning as the logo mark and the
@@ -102,16 +106,26 @@ class TimerBar(tk.Frame):
         # inert/disabled control instead of one that needs a click. Only
         # set when nothing has been picked yet (activity_var starts as ""
         # and this only runs once as a result); a real selection is never
-        # overwritten, including across later refreshes. "QDM" itself is
-        # never a real activity name, so _selected_activity() below
-        # correctly treats it the same as the old blank state -- _start()'s
-        # existing "Choose an activity" guard already covers trying to
-        # start the timer without a real one picked.
-        if not self.activity_var.get():
-            self.activity_var.set("QDM")
+        # overwritten, including across later refreshes. The placeholder
+        # is never a real activity name, so _selected_activity() treats it
+        # as empty and Start stays disabled until a QDM is chosen.
+        current = self.activity_var.get()
+        if not current or current == _TIMER_PLACEHOLDER:
+            self.activity_var.set(_TIMER_PLACEHOLDER)
+        self._sync_start_enabled()
 
     def _selected_activity(self) -> Optional[Activity]:
-        return self._activities_by_name.get(self.activity_var.get())
+        name = self.activity_var.get()
+        if not name or name == _TIMER_PLACEHOLDER:
+            return None
+        return self._activities_by_name.get(name)
+
+    def _sync_start_enabled(self):
+        if self.is_running():
+            self.toggle_btn.config(state="normal")
+            return
+        self.toggle_btn.config(
+            state="normal" if self._selected_activity() is not None else "disabled")
 
     # ------------------------------------------------------------------
     def is_running(self) -> bool:
@@ -216,9 +230,11 @@ class TimerBar(tk.Frame):
         self.toggle_btn.config(text="Start Timer", style="Accent.TButton", icon="play")
         self.dot.delete("all")
         self.elapsed_label.config(text="")
+        self._sync_start_enabled()
 
     def _render_running(self):
-        self.toggle_btn.config(text="Stop Timer", style="Danger.TButton", icon="stop")
+        self.toggle_btn.config(text="Stop Timer", style="Danger.TButton", icon="stop",
+                               state="normal")
         self.dot.delete("all")
         self.dot.create_oval(0, 0, 10, 10, fill=theme.DANGER, outline="")
 

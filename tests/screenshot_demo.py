@@ -7,12 +7,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["HOME"] = tempfile.mkdtemp()
 
 from app.main_window import MainWindow
-from app.models import TimeEntry
+from app.models import Activity, Project, TimeEntry
+from app import config
 
 win = MainWindow()
 win.update()
 cal = win.calendar
 db = win.db
+general_id = db.add_project(Project(None, "Demo", config.DEFAULT_PROJECT_COLORS[0]))
+client_id = db.add_project(Project(None, "Client Alpha", config.DEFAULT_PROJECT_COLORS[3]))
+for name, jira_key, dur, project_id in (
+        ("Team Standup", None, 15, general_id),
+        ("Sprint Planning", None, 60, general_id),
+        ("Code Review", None, 30, general_id),
+        ("Development", "QDM-100", 120, client_id),
+):
+    db.add_activity(Activity(None, name, jira_key, dur, project_id=project_id))
 activities = db.list_activities()
 by_name = {a.name: a for a in activities}
 

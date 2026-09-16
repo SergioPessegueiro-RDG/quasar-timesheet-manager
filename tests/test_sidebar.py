@@ -49,6 +49,7 @@ class TestSearchFilterInPlace(unittest.TestCase):
         import tempfile
         import tkinter as tk
         from app.db import Database
+        from app.models import Activity, Project
         from app.sidebar import Sidebar
 
         root = tk.Tk()
@@ -57,6 +58,9 @@ class TestSearchFilterInPlace(unittest.TestCase):
         handle.close()
         db = Database(handle.name)
         try:
+            pid = db.add_project(Project(None, "Test Work", "#4C6EF5"))
+            db.add_activity(Activity(None, "Sprint Planning", None, 60, project_id=pid))
+            db.add_activity(Activity(None, "Other Work", None, 30, project_id=pid))
             sb = Sidebar(
                 root, db, on_change=lambda: None,
                 open_activity_panel=lambda **_k: None,

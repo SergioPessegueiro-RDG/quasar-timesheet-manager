@@ -313,8 +313,9 @@ app/sidebar.py                      activities list, grouped into collapsible pr
 app/time_rounding.py                 minute-rounding helper (unit-testable, no Tkinter)
 app/timer_bar.py                      the Timer bar
 app/main_window.py                     header + timer bar + menu + window/tab assembly
-app/assets/logo.png                    in-window header mark (generated)
-packaging/icons/                       Dock / .exe / .desktop icon files + source.png
+app/assets/logo.png                    in-window header mark, dark (generated)
+app/assets/logo_light.png              in-window header mark, light (generated)
+packaging/icons/                       Dock / .exe / .desktop icons + source.png / whitevariant.png
 tests/                                 unit tests + headless UI smoke tests
 ```
 
@@ -340,13 +341,16 @@ Each script sets up its own disposable virtual environment under
 app landed. `python3 app.py` keeps working alongside a packaged build
 either way.
 
-To change the app icon, drop a square PNG at
-`packaging/icons/source.png` and run `python3 packaging/make_icons.py`.
-The first run creates `packaging/.icons-venv` (Pillow lives there; it is
-not an app dependency). That rewrites `icon.png` / `icon.ico` /
-`icon.icns` and the in-window `app/assets/logo.png` plus a Dock glyph
-at `app/assets/app_icon.png`. Rebuild the packaged app for Dock /
-installer icons to pick up the new files.
+To change the app icons, drop square PNGs at `packaging/icons/source.png`
+(dark / full-bleed) and `packaging/icons/whitevariant.png` (light / white
+background), then run `python3 packaging/make_icons.py`. The first run
+creates `packaging/.icons-venv` (Pillow lives there; it is not an app
+dependency). That rewrites `icon.png` / `icon.ico` / `icon.icns` and the
+in-window `app/assets/logo.png` plus `logo_light.png`, and Dock glyphs at
+`app/assets/app_icon.png` / `app_icon_light.png`. Settings → Theme → App
+icon lets you swap: Auto follows the palette (light themes use the white
+mark, dark themes use the full-bleed mark), or pin Dark / Light. Rebuild
+the packaged app for Finder / installer icons to pick up `source.png`.
 
 To update an already-installed macOS app instead of repeating this by
 hand, see "Updating the app" above (`Update and Reinstall App.command`).

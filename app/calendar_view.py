@@ -196,14 +196,21 @@ def _pack_block_lines(
     return chosen
 
 
+# Stacked "Not synced" under the title needs about this much height;
+# 15-minute slots (often ~22–34px) fall short, so the caption shares
+# the title line instead of drawing on top of it.
+_UNSENT_STACK_MIN_HEIGHT = 32
+_UNSENT_STACK_RESERVE = 16
+
+
 def _unsent_label_reserve(block_height: float) -> float:
-    """Space to keep at the bottom of a block for the Not synced caption.
+    """Space to keep at the bottom of a block for a stacked Not synced caption.
 
     Short slots skip the reserve so the title still fits; the caption
-    then sits on the last line instead.
+    then sits on the title line, right-aligned.
     """
-    if block_height >= 32:
-        return 16
+    if block_height >= _UNSENT_STACK_MIN_HEIGHT:
+        return _UNSENT_STACK_RESERVE
     return 0
 
 
@@ -379,7 +386,7 @@ class CalendarGrid(tk.Frame):
             # read as glyphs, not as a square plate around a round button.
             RoundedButton(nav, text="‹", width=3, style="Nav.TButton", compact=True,
                           command=self._prev_week).pack(side="left")
-            RoundedButton(nav, text="Today", style="Nav.TButton",
+            RoundedButton(nav, text="Today", style="Ghost.TButton",
                           command=self._go_today).pack(side="left", padx=6)
             RoundedButton(nav, text="›", width=3, style="Nav.TButton", compact=True,
                           command=self._next_week).pack(side="left")
@@ -388,36 +395,34 @@ class CalendarGrid(tk.Frame):
                                     bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY)
         self.week_label.pack(side="left", padx=16)
 
+        self.hint_label = tk.Label(nav, text="", font=(self.family, 9), bd=0,
+                                    bg=theme.PANEL_BG, fg=theme.TEXT_SECONDARY)
+
+        # Zoom on the far right; Apply Template sits just left of it so
+        # the week title can grow without clipping the chip.
+        zoom_row = tk.Frame(nav, bg=theme.PANEL_BG)
+        zoom_row.pack(side="right")
+        self._zoom_row = zoom_row
+        RoundedButton(zoom_row, text="−", width=3, style="Nav.TButton", compact=True,
+                      command=self._zoom_out).pack(side="left")
+        self.zoom_label = tk.Label(
+            zoom_row, text="100%", font=(self.family, 9, "bold"),
+            bg=theme.PANEL_BG, fg=theme.TEXT_SECONDARY, width=5, anchor="center")
+        self.zoom_label.pack(side="left")
+        RoundedButton(zoom_row, text="+", width=3, style="Nav.TButton", compact=True,
+                      command=self._zoom_in).pack(side="left")
+
         if not self.template_mode:
             # Copies every block from the Template tab onto whatever week
             # this grid currently has open -- the fast way to fill in a
             # recurring week instead of re-creating the same meetings by
             # hand every time.
             self.apply_template_btn = RoundedButton(
-                nav, text="Apply Template to This Week", style="Nav.TButton",
+                nav, text="Apply Template", style="Ghost.TButton",
                 command=self._apply_template)
-            self.apply_template_btn.pack(side="left", padx=(4, 0))
+            self._pack_apply_template()
 
-        self.hint_label = tk.Label(nav, text="", font=(self.family, 9), bd=0,
-                                    bg=theme.PANEL_BG, fg=theme.TEXT_SECONDARY)
-        self.hint_label.pack(side="right")
-
-        # Manual zoom -- "-" / percentage / "+", packed right-to-left so
-        # they land just left of the hint text (side="right" packs stack
-        # inward from whatever's already claimed the right edge -- see the
-        # nav-button comments above for the same pattern with ‹/Today/›).
-        # Plain ASCII glyphs rather than a magnifying-glass icon, same
-        # reasoning as theme.draw_logo_mark's own docstring: no font/
-        # platform-availability guesswork.
-        RoundedButton(nav, text="+", width=3, style="Nav.TButton", compact=True,
-                      command=self._zoom_in).pack(side="right", padx=(6, 0))
-        self.zoom_label = tk.Label(nav, text="100%", font=(self.family, 9, "bold"),
-                                    bg=theme.PANEL_BG, fg=theme.TEXT_SECONDARY, width=4)
-        self.zoom_label.pack(side="right")
-        RoundedButton(nav, text="−", width=3, style="Nav.TButton", compact=True,
-                      command=self._zoom_out).pack(side="right")
-
-        # Below some width, "Apply Template to This Week" (and then the
+        # Below some width, Apply Template (and then the
         # hint text) would otherwise start overlapping the zoom controls
         # instead of everything just quietly not fitting -- pack() alone
         # doesn't shrink or wrap widgets that no longer fit their row, it
@@ -570,9 +575,9 @@ class CalendarGrid(tk.Frame):
 
         Plain pack() doesn't shrink or wrap a widget that no longer fits
         its row -- it just lets it collide with whatever else is packed
-        there, which is exactly what "Apply Template to This Week" (a
-        long label) started doing to the zoom controls on a narrower
-        window once those existed. Rather than let that overlap happen,
+        there, which is exactly what Apply Template (a Ghost chip) started
+        doing to the zoom controls on a narrower window once those existed.
+        Rather than let that overlap happen,
         this hides -- in order, least useful first -- the hint text, then
         Apply Template, the moment there genuinely isn't room for them
         alongside the prev/Today/next buttons, the week range, and the
@@ -583,7 +588,9 @@ class CalendarGrid(tk.Frame):
             return
 
         always_on = [w for w in nav.winfo_children()
-                     if w is not self.apply_template_btn and w is not self.hint_label]
+                     if w is not self.apply_template_btn
+                     and w is not self.hint_label
+                     and w.winfo_ismapped()]
         core_w = sum(w.winfo_reqwidth() for w in always_on)
 
         if self.apply_template_btn is not None:
@@ -591,18 +598,19 @@ class CalendarGrid(tk.Frame):
             if fits_apply != self._apply_template_visible:
                 self._apply_template_visible = fits_apply
                 if fits_apply:
-                    self.apply_template_btn.pack(side="left", padx=(4, 0))
+                    self._pack_apply_template()
                 else:
                     self.apply_template_btn.pack_forget()
 
         shown_w = core_w
         if self.apply_template_btn is not None and self._apply_template_visible:
             shown_w += self.apply_template_btn.winfo_reqwidth()
-        fits_hint = available >= shown_w + self.hint_label.winfo_reqwidth() + 8
+        has_hint = bool(self.hint_label.cget("text"))
+        fits_hint = has_hint and available >= shown_w + self.hint_label.winfo_reqwidth() + 8
         if fits_hint != self._hint_visible:
             self._hint_visible = fits_hint
             if fits_hint:
-                self.hint_label.pack(side="right")
+                self._pack_hint()
             else:
                 self.hint_label.pack_forget()
 
@@ -1246,6 +1254,7 @@ class CalendarGrid(tk.Frame):
                 text=f"{self.week_start.strftime('%b %d')} – {end_date.strftime('%b %d, %Y')}"
             )
         self._update_hint()
+        self._reflow_nav_row()
 
         canvas_width = self.gutter_width + len(config.DAY_NAMES) * self.day_width
         grid_top = self.header_height
@@ -1489,14 +1498,50 @@ class CalendarGrid(tk.Frame):
                 text=f"  Drop “{act.name}” on a day — {config.QDM_DROP_MINUTES} min, then add a description  ",
                 bg=theme.ACCENT_SOFT, fg=theme.ACCENT,
             )
+            self._pack_hint()
         elif armed:
             self.hint_label.config(
                 text=f"  Placing “{armed.name}” — click a slot (Esc to cancel)  ",
                 bg=theme.ACCENT_SOFT, fg=theme.ACCENT,
             )
+            self._pack_hint()
         else:
-            self.hint_label.config(text="Drag a QDM onto the grid, or drag a slot to add a block",
-                                    bg=theme.PANEL_BG, fg=theme.TEXT_SECONDARY)
+            self.hint_label.config(text="", bg=theme.PANEL_BG, fg=theme.TEXT_SECONDARY)
+            self.hint_label.pack_forget()
+            self._hint_visible = False
+
+    def _pack_apply_template(self):
+        btn = self.apply_template_btn
+        zoom = getattr(self, "_zoom_row", None)
+        if btn is None:
+            return
+        try:
+            if zoom is not None:
+                btn.pack(side="right", after=zoom, padx=(0, 8))
+            else:
+                btn.pack(side="right", padx=(0, 8))
+        except tk.TclError:
+            btn.pack(side="right", padx=(0, 8))
+
+    def _pack_hint(self):
+        anchor = None
+        btn = self.apply_template_btn
+        if btn is not None and self._apply_template_visible:
+            try:
+                if btn.winfo_ismapped():
+                    anchor = btn
+            except tk.TclError:
+                pass
+        if anchor is None:
+            anchor = getattr(self, "_zoom_row", None)
+        try:
+            if anchor is not None:
+                self.hint_label.pack(side="right", after=anchor, padx=(0, 8))
+            else:
+                self.hint_label.pack(side="right", padx=(0, 8))
+            self._hint_visible = True
+        except tk.TclError:
+            pass
 
     def _layout_day_entries(self, day_entries: List[EntryLike]) -> Dict[int, Tuple[int, int]]:
         """Overlapping blocks aren't rejected (see the removed overlap
@@ -1666,9 +1711,13 @@ class CalendarGrid(tk.Frame):
         unsent = (not self.template_mode and isinstance(entry, TimeEntry)
                   and entry_needs_push(entry) and (x1 - x0) > 20 and (y1 - y0) > 12)
         reserve = _unsent_label_reserve(y1 - y0) if unsent else 0
+        unsent_w = 0
+        if unsent and reserve == 0:
+            caption, caption_font = self._unsent_caption_text(x1 - x0)
+            unsent_w = caption_font.measure(caption) + 12
         rail = 5
         for text, is_bold, ty in self._entry_text_lines(
-                entry, x0 + rail, y0, x1, y1 - reserve):
+                entry, x0 + rail, y0, x1 - unsent_w, y1 - reserve):
             item = self.canvas.create_text(
                 x0 + 8 + rail, ty, text=text, anchor="nw",
                 font=(self.family, 9 if is_bold else 8, "bold" if is_bold else "normal"),
@@ -1691,18 +1740,33 @@ class CalendarGrid(tk.Frame):
             tags=("entry", tag),
         )
 
-    def _draw_unsent_label(self, x0, y0, x1, y1, block_fill, tag, project_color=None):
-        """Quiet 'Not synced' caption — no chip, no alarm red."""
+    def _unsent_caption_text(self, block_width: float):
         font = tkfont.Font(family=self.family, size=8)
         label = "Not synced"
-        if font.measure(label) > (x1 - x0 - 16):
+        if font.measure(label) > (block_width - 16):
             label = "Unsynced"
+        return label, font
+
+    def _draw_unsent_label(self, x0, y0, x1, y1, block_fill, tag, project_color=None):
+        """Quiet 'Not synced' caption — no chip, no alarm red.
+
+        Tall enough blocks stack it under the title. 15-minute slots put
+        it on the title line, right-aligned, so the two strings cannot
+        paint over each other.
+        """
         if (y1 - y0) < 14:
+            return
+        label, font = self._unsent_caption_text(x1 - x0)
+        fill = theme.unsent_label_color(block_fill, project_color)
+        if (y1 - y0) < _UNSENT_STACK_MIN_HEIGHT:
+            self.canvas.create_text(
+                x1 - 6, y0 + 4, text=label, anchor="ne",
+                font=font, fill=fill, tags=("entry", tag, "unsent"),
+            )
             return
         self.canvas.create_text(
             x0 + 8, y1 - 6, text=label, anchor="sw",
-            font=font, fill=theme.unsent_label_color(block_fill, project_color),
-            tags=("entry", tag, "unsent"),
+            font=font, fill=fill, tags=("entry", tag, "unsent"),
         )
 
     def _overlay_events(self) -> List[CalendarEvent]:

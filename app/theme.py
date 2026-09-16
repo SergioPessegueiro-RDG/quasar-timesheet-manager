@@ -1009,6 +1009,48 @@ def window_alpha(theme_id: str = None) -> float:
     return _glass_alpha
 
 
+# Two app marks: the full-bleed source.png (dark themes) and the white-
+# background whitevariant.png (light themes). Auto follows the active
+# palette; Dark / Light pin one mark on every theme.
+APP_ICON_AUTO = "auto"
+APP_ICON_DARK = "dark"
+APP_ICON_LIGHT = "light"
+APP_ICON_MODES = (APP_ICON_AUTO, APP_ICON_DARK, APP_ICON_LIGHT)
+APP_ICON_DEFAULT = APP_ICON_AUTO
+_app_icon_mode = APP_ICON_DEFAULT
+
+
+def resolve_app_icon_mode(value) -> str:
+    key = (value or "").strip().lower()
+    return key if key in APP_ICON_MODES else APP_ICON_DEFAULT
+
+
+def get_app_icon_mode() -> str:
+    return _app_icon_mode
+
+
+def set_app_icon_mode(value) -> str:
+    global _app_icon_mode
+    _app_icon_mode = resolve_app_icon_mode(value)
+    return _app_icon_mode
+
+
+def theme_is_dark(theme_id: str = None) -> bool:
+    """Whether the resolved palette is on the dark side of the luminance
+    line -- same check derive_palette uses for FIELD_BG / SURFACE."""
+    info = get_theme(theme_id if theme_id is not None else CURRENT_THEME_ID)
+    return _is_dark(info["palette"]["APP_BG"])
+
+
+def resolved_app_icon_variant(theme_id: str = None) -> str:
+    mode = get_app_icon_mode()
+    if mode == APP_ICON_LIGHT:
+        return APP_ICON_LIGHT
+    if mode == APP_ICON_DARK:
+        return APP_ICON_DARK
+    return APP_ICON_DARK if theme_is_dark(theme_id) else APP_ICON_LIGHT
+
+
 def apply_window_opacity(root, theme_id: str = None):
     """Set wm -alpha from the Translucency slider (every theme)."""
     alpha = window_alpha(theme_id)
@@ -1035,32 +1077,52 @@ def _asset_path(name: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", name)
 
 
-def _logo_asset_path() -> str:
+def _logo_asset_path(variant: str = None) -> str:
+    chosen = variant or resolved_app_icon_variant()
+    if chosen == APP_ICON_LIGHT:
+        path = _asset_path("logo_light.png")
+        if os.path.isfile(path):
+            return path
     return _asset_path("logo.png")
 
 
-def _app_icon_path() -> str:
+def _app_icon_path(variant: str = None) -> str:
+    chosen = variant or resolved_app_icon_variant()
+    if chosen == APP_ICON_LIGHT:
+        path = _asset_path("app_icon_light.png")
+        if os.path.isfile(path):
+            return path
     return _asset_path("app_icon.png")
 
 
-def draw_logo_mark(canvas, size=28, pad=1):
-    """Paint the bundled app mark (app/assets/logo.png) onto the header canvas.
-
-    The Dock / installer icon is the same artwork, generated from
-    packaging/icons/source.png by packaging/make_icons.py.
-    """
-    canvas.delete("all")
-    path = _logo_asset_path()
+def load_logo_photo(size: int, variant: str = None):
+    """Subsampled PhotoImage of the header mark, or None if missing."""
+    path = _logo_asset_path(variant)
     if not os.path.isfile(path):
-        return
+        return None
     try:
         photo = tk.PhotoImage(file=path)
     except tk.TclError:
-        return
-    inner = max(1, int(size) - 2 * int(pad))
+        return None
+    inner = max(1, int(size))
     factor = max(1, int(photo.width()) // inner)
     if factor > 1:
         photo = photo.subsample(factor)
+    return photo
+
+
+def draw_logo_mark(canvas, size=28, pad=1, variant=None):
+    """Paint the bundled app mark onto the header canvas.
+
+    Auto uses logo_light.png on light palettes and logo.png on dark ones
+    (see resolved_app_icon_variant). Generated from source.png /
+    whitevariant.png by packaging/make_icons.py.
+    """
+    canvas.delete("all")
+    inner = max(1, int(size) - 2 * int(pad))
+    photo = load_logo_photo(inner, variant=variant)
+    if photo is None:
+        return
     canvas.create_image(int(size) // 2, int(size) // 2, image=photo, anchor="center")
     canvas._logo_photo = photo
 

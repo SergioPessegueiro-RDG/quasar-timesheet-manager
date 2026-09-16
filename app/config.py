@@ -143,7 +143,7 @@ DEFAULT_SIDEBAR_WIDTH_PX = 320
 # outer pack margin plus a 4px RoundedCard pad on each side (see
 # Sidebar.__init__'s card_padx/card_pady), leaving 60 - 2*(6+4) = 40px of
 # actual content width -- enough for the 32px round expand button and the
-# rotated "QDM's" label/Project dots below it without clipping. An
+# rotated "QDMs" label/Project dots below it without clipping. An
 # earlier 40px (then 48px) version didn't budget for that padding at all,
 # which is why the button and dots rendered as thin clipped slivers
 # instead of the small-but-intact shapes they were meant to be.

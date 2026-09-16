@@ -21,7 +21,7 @@ os.environ["HOME"] = tmp_home
 
 from app.main_window import MainWindow  # noqa: E402
 from app import theme  # noqa: E402
-from app.models import TimeEntry  # noqa: E402
+from app.models import Activity, Project, TimeEntry  # noqa: E402
 
 failures = []
 
@@ -49,7 +49,9 @@ win.calendar._next_week()
 win.update()
 week_before = win.calendar.week_start
 db = win.db
-act = db.list_activities()[0]
+pid = db.add_project(Project(None, "Theme Test", "#4C6EF5"))
+act = db.get_activity(db.add_activity(
+    Activity(None, "Theme Test", None, 60, project_id=pid)))
 db.add_time_entry(TimeEntry(None, act.id, act.name, act.jira_key, act.color,
                              win.calendar.day_date(0).isoformat(), "09:00", "10:00", "theme test"))
 win.calendar.refresh()

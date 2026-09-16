@@ -62,6 +62,9 @@ class MainWindow(tk.Tk):
         saved_theme = self.db.get_setting("theme_mode", theme.DEFAULT_THEME_ID) or theme.DEFAULT_THEME_ID
         theme.set_theme(saved_theme)
 
+        saved_icon = self.db.get_setting("app_icon", theme.APP_ICON_DEFAULT) or theme.APP_ICON_DEFAULT
+        theme.set_app_icon_mode(saved_icon)
+
         saved_alpha = self.db.get_setting("glass_alpha", str(theme.WINDOW_ALPHA_DEFAULT))
         theme.set_glass_alpha(saved_alpha)
 
@@ -152,7 +155,7 @@ class MainWindow(tk.Tk):
         except tk.TclError:
             pass
         self._apply_app_icon()
-        if sys.platform == "darwin" and not getattr(sys, "frozen", False):
+        if sys.platform == "darwin":
             self.after(200, self._apply_app_icon)
             self.after(800, self._apply_app_icon)
 
@@ -381,12 +384,12 @@ class MainWindow(tk.Tk):
             pass
 
     def _apply_app_icon(self):
-        """Set the window / Dock icon.
+        """Set the window / Dock icon from the resolved light or dark mark.
 
-        Packaged macOS builds leave this to the bundle .icns. From source,
-        fill the Dock tile with the full-bleed mark so macOS clips it --
-        iconphoto would be a sharp square (or a smaller icon with a black
-        frame if we pre-round it).
+        Packaged macOS Finder still uses the bundle .icns. The running
+        Dock tile and the in-window header follow Settings → App icon
+        (Auto / Dark / Light). iconphoto on Windows/Linux is a square;
+        on Mac we fill the Dock tile so the system clips it.
         """
         path = theme._app_icon_path()
         if not os.path.isfile(path):
@@ -394,8 +397,6 @@ class MainWindow(tk.Tk):
         if not os.path.isfile(path):
             return
         if sys.platform == "darwin":
-            if getattr(sys, "frozen", False):
-                return
             mac_dock.fill_dock_tile(path)
             return
         try:
@@ -403,6 +404,18 @@ class MainWindow(tk.Tk):
             self.iconphoto(True, self._app_icon)
         except tk.TclError:
             pass
+
+    def _redraw_header_logo(self):
+        canvas = getattr(self, "_header_logo", None)
+        if canvas is None:
+            return
+        try:
+            if not canvas.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        profile = self._HEADER_PROFILES.get(self.header_style, self._HEADER_PROFILES["standard"])
+        theme.draw_logo_mark(canvas, size=profile["logo_size"])
 
     def _log_startup_diagnostics(self):
         """Best-effort, never-blocking record of exactly what Tk thinks
@@ -462,7 +475,7 @@ class MainWindow(tk.Tk):
         menubar = tk.Menu(self)
 
         file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="Sync QDMs from Jira…", command=self._sync_qdms_from_jira)
+        file_menu.add_command(label="Refresh QDMs from Jira…", command=self._sync_qdms_from_jira)
         file_menu.add_command(label="Push this week to Jira…", command=self._push_visible_week)
         file_menu.add_command(label="Export CSV…", command=self._open_export_dialog)
         file_menu.add_separator()
@@ -516,6 +529,7 @@ class MainWindow(tk.Tk):
         show_header = self.header_style != "hidden"
         show_timer = self.show_timer_bar
         themed = getattr(self, "_themed_titlebar", False)
+        self._header_logo = None
 
         if not show_header and not show_timer:
             if themed:
@@ -553,6 +567,7 @@ class MainWindow(tk.Tk):
                               bg=theme.PANEL_BG, highlightthickness=0)
             logo.pack(side="left", padx=(0, 8))
             theme.draw_logo_mark(logo, size=profile["logo_size"])
+            self._header_logo = logo
             tk.Label(title_row, text="QUASAR Timesheet Manager",
                      font=(self.family, profile["title_pt"], "bold"),
                      bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY).pack(side="left")
@@ -761,8 +776,8 @@ class MainWindow(tk.Tk):
         # "Template" is different: it's a second permanent tab (never hidden
         # via _register_panel/_show_panel) holding a recurring Mon-Fri week
         # of blocks that isn't tied to any real date -- see the module
-        # docstring in app/calendar_view.py. "Apply Template to This Week"
-        # on the Timesheet tab copies it onto whatever week is open there.
+        # docstring in app/calendar_view.py. "Apply Template" on the
+        # Timesheet tab copies it onto whatever week is open there.
         # Hand-drawn tab strip instead of ttk.Notebook's own (square-
         # cornered, see theme.apply_theme's tabposition="" note) -- this
         # row of RoundedButton toggles is purely cosmetic. It doesn't
@@ -774,16 +789,16 @@ class MainWindow(tk.Tk):
         # and calls .select() on click, refreshed by _refresh_tab_bar()
         # (called from _on_tab_changed, so it stays in sync with every
         # notebook.select()/tab(state=...) call anywhere in this file).
-        # tab_row holds the hand-drawn tab strip on the left and Push to
-        # Jira on the right -- that used to live in the header (see
-        # _build_top_bar), but now always sits here instead, regardless
-        # of which Heading size is chosen (including "hidden", which has
-        # no header row left to hold it at all). CSV export is under File
-        # so this row stays a single Jira action. self.tab_bar itself
-        # holds only the tab buttons: _refresh_tab_bar() below destroys
+        # tab_row holds the work tabs on the left (Timesheet / Template /
+        # Summary, plus any one-off panel tab) and the Jira push chip plus
+        # a Settings chip on the right. Settings used to sit in that left
+        # strip as a fourth equal tab; it's configuration, not a workspace,
+        # so it stays off the primary nav. CSV export is under File so
+        # this row stays a Jira action + Settings. self.tab_bar itself
+        # holds only the work-tab buttons: _refresh_tab_bar() destroys
         # and rebuilds *its* children on every tab change, so the CTA
-        # lives in this separate sibling frame instead of inside tab_bar,
-        # where that rebuild would otherwise destroy it too.
+        # and Settings chip live in this sibling frame instead of inside
+        # tab_bar, where that rebuild would otherwise destroy them too.
         self._body_gen = getattr(self, "_body_gen", 0) + 1
         self._secondary_built = False
         self._secondary_step = 0
@@ -814,10 +829,16 @@ class MainWindow(tk.Tk):
         tab_row.pack(fill="x", padx=16, pady=(10, 10))
         self._tab_row = tab_row
 
+        self.settings_btn = RoundedButton(
+            tab_row, text="", style="Ghost.TButton",
+            icon="gear", command=self._open_settings_dialog)
+        self.settings_btn.pack(side="right")
+
         self.push_btn = RoundedButton(
-            tab_row, text="Synced", style="Ghost.TButton",
+            tab_row, text="Synced", style="Quiet.TButton",
             icon="jira", command=self._push_visible_week)
-        self.push_btn.pack(side="right")
+        self.push_btn.pack(side="right", padx=(0, 8))
+        self.push_btn.config(state="disabled")
 
         self.tab_bar = tk.Frame(tab_row, bg=theme.APP_BG)
         self.tab_bar.pack(side="left", fill="x", expand=True)
@@ -827,10 +848,11 @@ class MainWindow(tk.Tk):
         self.notebook.pack(fill="both", expand=True, padx=16, pady=(0, 16))
         self._panels = []
 
-        # Empty shells for the four permanent tabs, then paint the strip
-        # before Sidebar/Calendar/Summary construction (that work is
-        # seconds). Bind <<NotebookTabChanged>> after this paint so each
-        # .add() doesn't rebuild the buttons four times first.
+        # Empty shells for the three work tabs plus Settings (opened from
+        # the Settings chip, not this strip), then paint the strip before
+        # Sidebar/Calendar/Summary construction (that work is seconds).
+        # Bind <<NotebookTabChanged>> after this paint so each .add()
+        # doesn't rebuild the buttons four times first.
         body = tk.Frame(self.notebook, bg=theme.APP_BG)
         self.notebook.add(body, text="Timesheet")
         self.timesheet_tab = body
@@ -1200,10 +1222,12 @@ class MainWindow(tk.Tk):
     def _refresh_tab_bar(self):
         """Rebuild the hand-drawn tab strip (see _build_body) from
         self._all_tabs + the notebook's own current state -- one button
-        per tab currently in "normal" state (every permanent tab, plus
-        whichever single transient panel _show_panel most recently made
-        visible, if any). The selected tab is a Ghost chip (same family
-        as Today / Synced); the rest are Quiet labels, not extra plates."""
+        per work tab currently in "normal" state (Timesheet / Template /
+        Summary, plus whichever single transient panel _show_panel most
+        recently made visible, if any). Settings is a labeled chip on the
+        right, not a fourth equal tab. The selected work tab is a Ghost
+        chip (same family as Today); the rest are Quiet labels. Synced in
+        this row is a status, not a chip."""
         try:
             selected = self.notebook.select()
         except tk.TclError:
@@ -1211,6 +1235,8 @@ class MainWindow(tk.Tk):
         for child in self.tab_bar.winfo_children():
             child.destroy()
         for widget, tab_text in self._all_tabs:
+            if tab_text == "Settings":
+                continue
             try:
                 state = self.notebook.tab(widget, option="state")
             except tk.TclError:
@@ -1352,6 +1378,7 @@ class MainWindow(tk.Tk):
         self._build_menu()
         self._build_top_bar(initial_timer_state=timer_state)
         self._build_body(initial_week_start=week_start)
+        self._apply_app_icon()
 
     # ------------------------------------------------------------------
     def _load_settings_panel(self):
@@ -1400,6 +1427,7 @@ class MainWindow(tk.Tk):
             self.db.set_setting("custom_theme_text", custom_seeds["text_primary"])
             self.db.set_setting("custom_theme_accent", custom_seeds["accent"])
             self.db.set_setting("glass_alpha", f"{theme.get_glass_alpha():.3f}")
+            self.db.set_setting("app_icon", theme.get_app_icon_mode())
 
             hours_changed = (new_work_start_hour != current_work_start_hour
                               or new_work_end_hour != current_work_end_hour
@@ -1433,6 +1461,8 @@ class MainWindow(tk.Tk):
                 self.after(0, lambda: self._select_theme(new_theme_id))
             else:
                 theme.apply_window_opacity(self)
+                self._apply_app_icon()
+                self._redraw_header_logo()
 
             if new_calendar_urls != old_calendar_urls:
                 self.after(0, lambda urls=new_calendar_urls: self._refresh_calendar_feed(
@@ -1462,10 +1492,9 @@ class MainWindow(tk.Tk):
     def _open_settings_dialog(self):
         if self._welcome_blocks_app():
             return
-        # Settings is a permanent tab now (see _build_body) -- this just
-        # jumps the notebook to it, still wired up from the Settings/View
-        # menu's "Jira & Settings…"/"Theme…" entries now that the
-        # header button that used to call this is gone.
+        # Settings is a permanent notebook tab opened from the Settings
+        # chip (and from Settings/View → Jira & Settings… / Theme…), not
+        # from the left-hand Timesheet/Template/Summary strip.
         self._ensure_secondary_tabs(now=True)
         self._load_settings_panel()
         self.notebook.select(self.settings_tab)
@@ -1527,7 +1556,11 @@ class MainWindow(tk.Tk):
                 self.db.list_time_entries_between(start, end),
                 self.db.list_pending_worklog_deletes(start, end),
             )
-            btn.config(text=text, style=style)
+            # Synced is a status, not an action — only a week with unsent
+            # hours gets a clickable Push chip.
+            btn.config(
+                text=text, style=style,
+                state="disabled" if text == "Synced" else "normal")
         except tk.TclError:
             pass
 
@@ -1830,7 +1863,7 @@ class MainWindow(tk.Tk):
             return
         self._jira_alert(
             "Jira",
-            f"Connected as {name}. Sync QDMs only reads your assigned issues — "
+            f"Connected as {name}. Refresh QDMs only reads your assigned issues — "
             "it does not change anything in Jira.",
             kind="info")
 
@@ -2001,7 +2034,7 @@ class MainWindow(tk.Tk):
             if quiet:
                 return
             self._jira_alert(
-                "Sync QDMs",
+                "Refresh QDMs",
                 "Add your Jira site URL and API token in Settings first "
                 "(or set QUASAR_JIRA_URL / QUASAR_JIRA_TOKEN), then try again.")
             self._open_settings_dialog()
@@ -2023,7 +2056,7 @@ class MainWindow(tk.Tk):
                     f"{traceback.format_exc()}")
                 self._call_on_ui(
                     lambda err=err, quiet=quiet: self._jira_job_failed(
-                        "Sync QDMs", err, quiet=quiet))
+                        "Refresh QDMs", err, quiet=quiet))
                 return
             self._call_on_ui(
                 lambda fetched=fetched, quiet=quiet: self._apply_jira_sync(
@@ -2046,7 +2079,7 @@ class MainWindow(tk.Tk):
             self._on_jira_sync_done(result, quiet=quiet)
         except Exception as exc:
             jira_client._log(f"sync_issues_into_db failed: {exc}\n{traceback.format_exc()}")
-            self._jira_job_failed("Sync QDMs", str(exc), quiet=quiet)
+            self._jira_job_failed("Refresh QDMs", str(exc), quiet=quiet)
 
     def _on_jira_sync_done(self, result: jira_sync.SyncResult, quiet: bool = False):
         self._jira_sync_in_flight = False
@@ -2057,7 +2090,7 @@ class MainWindow(tk.Tk):
             return
         if result.fetched == 0:
             self._jira_alert(
-                "Sync QDMs",
+                "Refresh QDMs",
                 "Jira returned no open issues assigned to this account.\n\n"
                 "Nothing was changed in Jira — this is only a read.\n\n"
                 "If you expected a list, check the Project key (QDM) and that "
@@ -2077,7 +2110,7 @@ class MainWindow(tk.Tk):
                 "(newest assigned first). Older assigned tickets may not appear."
             )
         self._jira_alert(
-            "Sync QDMs",
+            "Refresh QDMs",
             f"Fetched {result.fetched} issue(s) assigned to you.\n"
             f"Added {result.created} QDM(s) to the sidebar, updated {result.updated}, "
             f"created {result.projects_created} project group(s).\n\n"
@@ -2227,7 +2260,7 @@ class MainWindow(tk.Tk):
             "• File → New QDM / New Project adds a local activity or group "
             "when you need something that isn't in Jira. A project sets the "
             "color for its time blocks — right-click a project to edit it.\n"
-            "• File → Sync QDMs from Jira… pulls open issues into the sidebar "
+            "• File → Refresh QDMs from Jira… pulls open issues into the sidebar "
             "(needs a token in Settings). File → Push hours to Jira… logs "
             "the week's blocks as worklogs on those issues — CSV export is "
             "still there as a fallback. “Not synced” on a timesheet block "

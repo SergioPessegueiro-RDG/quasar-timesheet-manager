@@ -74,8 +74,8 @@ win.update()
 check("_active_calendar() is None while Summary tab is active", win._active_calendar() is None)
 check("Summary panel defaults to week mode", summary.mode == "week")
 
-check("QDM total label reflects 5 hours across 2 QDM's",
-      summary._qdm["total_label"].cget("text") == "Total: 5.0h across 2 QDM's")
+check("QDM total label reflects 5 hours across 2 QDMs",
+      summary._qdm["total_label"].cget("text") == "Total: 5.0h across 2 QDMs")
 check("Project total label rolls both QDMs up into 1 project at 5.0h",
       summary._project["total_label"].cget("text") == "Total: 5.0h across 1 project")
 
@@ -103,8 +103,8 @@ print("\n--- Switching to Month mode aggregates the whole month ---")
 summary._set_mode("month")
 win.update()
 check("Mode switched to month", summary.mode == "month")
-check("Month view still totals 5.0h across 2 QDM's (same entries, wider window)",
-      summary._qdm["total_label"].cget("text") == "Total: 5.0h across 2 QDM's")
+check("Month view still totals 5.0h across 2 QDMs (same entries, wider window)",
+      summary._qdm["total_label"].cget("text") == "Total: 5.0h across 2 QDMs")
 
 print("\n--- Prev/Next navigation moves the anchor and Today returns ---")
 today_text = summary.period_label.cget("text")
@@ -113,7 +113,7 @@ win.update()
 prev_text = summary.period_label.cget("text")
 check("Prev month changed the period label", prev_text != today_text)
 check("Prev month with no entries shows the empty state in both columns",
-      summary._qdm["total_label"].cget("text") == "Total: 0.0h across 0 QDM's"
+      summary._qdm["total_label"].cget("text") == "Total: 0.0h across 0 QDMs"
       and summary._project["total_label"].cget("text") == "Total: 0.0h across 0 projects")
 summary._today()
 win.update()
@@ -137,7 +137,7 @@ db.add_time_entry(TimeEntry(None, meetings.id, meetings.name, meetings.jira_key,
 win.notebook.select(win.summary_tab)
 win.update()
 check("Switching onto the Summary tab auto-refreshed to include the new entry (6.0h total)",
-      summary._qdm["total_label"].cget("text") == "Total: 6.0h across 2 QDM's")
+      summary._qdm["total_label"].cget("text") == "Total: 6.0h across 2 QDMs")
 
 win.destroy()
 

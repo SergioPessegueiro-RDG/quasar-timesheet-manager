@@ -20,22 +20,35 @@ class TestDatabase(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
-    def test_seed_defaults(self):
-        activities = self.db.list_activities()
-        self.assertEqual(len(activities), 4)
-        names = {a.name for a in activities}
-        self.assertIn("Sprint Planning", names)
+    def _add_activity(self, name="Design Review", jira_key="QDM-1", duration=60):
+        pid = self.db.add_project(Project(None, "Test Project", config.DEFAULT_PROJECT_COLORS[0]))
+        aid = self.db.add_activity(Activity(
+            None, name, jira_key, duration, project_id=pid))
+        return self.db.get_activity(aid)
 
-        projects = self.db.list_projects()
-        project_names = {p.name for p in projects}
-        self.assertIn("General", project_names)
-        self.assertIn("Client Alpha", project_names)
+    def test_fresh_database_has_no_placeholder_qdms(self):
+        # Sample rows like Sprint Planning / General used to be inserted on
+        # first run. They aren't real Jira QDMs, so a new database starts
+        # empty and stays that way until the user syncs or adds one.
+        self.assertEqual(self.db.list_activities(), [])
+        self.assertEqual(self.db.list_projects(), [])
 
-        # Every seeded activity belongs to a real project and inherits its
-        # color -- there's no "ungrouped" state.
-        for a in activities:
-            self.assertIsNotNone(a.project_id)
-            self.assertIsNotNone(a.color)
+    def test_legacy_placeholder_qdms_are_removed_on_open(self):
+        general_id = self.db.add_project(Project(None, "General", "#111111"))
+        client_id = self.db.add_project(Project(None, "Client Alpha", "#222222"))
+        keep_id = self.db.add_project(Project(None, "Real Work", "#333333"))
+        self.db.add_activity(Activity(None, "Sprint Planning", None, 60, project_id=general_id))
+        self.db.add_activity(Activity(None, "Team Standup", None, 15, project_id=general_id))
+        self.db.add_activity(Activity(None, "Code Review", None, 30, project_id=general_id))
+        self.db.add_activity(Activity(None, "Development", "PROJ-100", 120, project_id=client_id))
+        self.db.add_activity(Activity(None, "Code Review", "QDM-99", 30, project_id=keep_id))
+        self.db.set_setting(Database._REMOVED_DEMO_SEED_SETTING, "0")
+        self.db.close()
+        self.db = Database(self.dbpath)
+
+        names_keys = {(a.name, a.jira_key) for a in self.db.list_activities()}
+        self.assertEqual(names_keys, {("Code Review", "QDM-99")})
+        self.assertEqual({p.name for p in self.db.list_projects()}, {"Real Work"})
 
     def test_list_known_jira_projects_always_includes_the_fixed_default(self):
         # A fresh database has no time blocks yet, but the fixed default
@@ -45,7 +58,7 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(self.db.list_known_jira_projects(), [config.DEFAULT_JIRA_PROJECT])
 
     def test_list_known_jira_projects_includes_projects_actually_used(self):
-        act = self.db.list_activities()[0]
+        act = self._add_activity()
         self.db.add_time_entry(TimeEntry(
             None, act.id, act.name, act.jira_key, act.color,
             "2026-08-24", "09:00", "10:00", "", jira_project="Other Client Project"))
@@ -63,7 +76,7 @@ class TestDatabase(unittest.TestCase):
                           {config.DEFAULT_JIRA_PROJECT, "Other Client Project", "Third Project"})
 
     def test_list_known_jira_projects_includes_activity_jira_projects(self):
-        act = self.db.list_activities()[0]
+        act = self._add_activity()
         act.jira_project = "Synced From Jira"
         self.db.update_activity(act)
         projects = self.db.list_known_jira_projects()
@@ -75,13 +88,12 @@ class TestDatabase(unittest.TestCase):
         # for a name -- a color is auto-picked so the user isn't stopped
         # to choose one.
         used = {p.color for p in self.db.list_projects()}
-        self.assertTrue(used, "seed data should already have used colors")
 
         project = self.db.add_project_with_default_color("New Client")
         self.assertIsNotNone(project.id)
         self.assertEqual(project.name, "New Client")
         self.assertNotIn(project.color, used)
-        self.assertIn(project.color, config.DEFAULT_PROJECT_COLORS)
+        self.assertEqual(project.color, config.DEFAULT_PROJECT_COLORS[0])
 
         stored = self.db.get_project(project.id)
         self.assertEqual(stored.name, "New Client")
@@ -812,9 +824,9 @@ class TestDatabase(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.db.restore_from(unrelated_path)
 
-        # The rejection should happen before anything is touched -- the
-        # seeded defaults from setUp() are still there.
-        self.assertEqual(len(self.db.list_activities()), 4)
+        # The rejection should happen before anything is touched -- a
+        # fresh database is still empty.
+        self.assertEqual(len(self.db.list_activities()), 0)
 
 
 if __name__ == "__main__":

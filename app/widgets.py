@@ -162,18 +162,18 @@ def _hex_bg_at(root, abs_x: int, abs_y: int, fallback: str, ignore=None) -> str:
 def segmented_button_style(selected: bool) -> str:
     """Chip for the active segment, plain label for the rest.
 
-    Same pairing as Today / Synced (Ghost) vs an unselected tab (Quiet):
+    Same pairing as Today (Ghost) vs an unselected tab (Quiet):
     selection is a light outlined pill, not a solid accent fill.
     """
     return "Ghost.TButton" if selected else "Quiet.TButton"
 
 
 _BUTTON_STYLES = {
-    # One vertical pad across chrome so Timesheet / Today / Synced / Start
+    # One vertical pad across chrome so Timesheet / Today / Push / Start
     # Timer share a height. Accent stays the only solid fill (Start Timer,
     # Save, Push when there is something to send). Ghost is the outlined
     # chip. Quiet is no plate -- idle fill matches the parent so unselected
-    # tabs read as labels, not extra buttons. "PARENT" is resolved at
+    # tabs and the Synced status read as labels, not extra buttons. "PARENT" is resolved at
     # draw time against the canvas behind the pill.
     "Accent.TButton": dict(bg="ACCENT", hover="ACCENT_HOVER", press="ACCENT_HOVER", fg="#FFFFFF",
                             bold=True, pad=(10, 6), border=None),
@@ -248,6 +248,35 @@ def draw_button_icon(canvas, kind: str, cx: float, cy: float, size: float, fill:
                 *_jira_tile_points(x0, y0, m),
                 fill=color, outline="", joinstyle="round", smooth=False)
         return
+    if kind == "gear":
+        # Settings cog: dented wheel, circular hub. The hole is the chip
+        # fill, redrawn on hover/press so it stays punched through.
+        teeth = 8
+        r_tip = size * 0.49
+        r_root = size * 0.36
+        r_hole = size * 0.22
+        step = math.pi / teeth
+        tooth_half = step * 0.46
+        tip_half = step * 0.22
+        pts = []
+        for i in range(teeth):
+            a = -math.pi / 2 + i * 2 * step
+            pts.extend((
+                cx + r_root * math.cos(a - tooth_half),
+                cy + r_root * math.sin(a - tooth_half),
+                cx + r_tip * math.cos(a - tip_half),
+                cy + r_tip * math.sin(a - tip_half),
+                cx + r_tip * math.cos(a + tip_half),
+                cy + r_tip * math.sin(a + tip_half),
+                cx + r_root * math.cos(a + tooth_half),
+                cy + r_root * math.sin(a + tooth_half),
+            ))
+        canvas.create_polygon(*pts, fill=fill, outline="", joinstyle="miter")
+        hole = background or fill
+        canvas.create_oval(
+            cx - r_hole, cy - r_hole, cx + r_hole, cy + r_hole,
+            fill=hole, outline="", width=0)
+        return
 
 
 class RoundedButton(tk.Canvas):
@@ -279,6 +308,7 @@ class RoundedButton(tk.Canvas):
         self._shadow = shadow
         self._compact = compact
         self._icon = icon
+        self._enabled = True
 
         self.bind("<Configure>", lambda e: self._redraw())
         self.bind("<Enter>", self._on_enter)
@@ -294,6 +324,8 @@ class RoundedButton(tk.Canvas):
             return self._text
         if key == "style":
             return self._style
+        if key == "state":
+            return "normal" if self._enabled else "disabled"
         return super().cget(key)
 
     def __getitem__(self, key):
@@ -315,6 +347,10 @@ class RoundedButton(tk.Canvas):
             resize = True
         if "command" in kwargs:
             self._command = kwargs.pop("command")
+        if "state" in kwargs:
+            state = str(kwargs.pop("state") or "normal").lower()
+            self._enabled = state not in ("disabled", "0")
+            super().configure(cursor="hand2" if self._enabled else "arrow")
         if "width" in kwargs:
             # A plain int here means ttk-style "character width" (this
             # app's only usage, e.g. width=3 for the "‹"/"›" nav buttons)
@@ -352,6 +388,11 @@ class RoundedButton(tk.Canvas):
             super().configure(width=side, height=side)
             self._redraw()
             return
+        if self._icon and not (self._text or "").strip():
+            side = int(height)
+            super().configure(width=side + 2 * glow, height=int(height) + 2 * glow)
+            self._redraw()
+            return
         width = max(text_w + 2 * pad_x + self._icon_span(), 2 * pad_x + 4)
         super().configure(width=int(width) + 2 * glow, height=int(height) + 2 * glow)
         self._redraw()
@@ -362,7 +403,7 @@ class RoundedButton(tk.Canvas):
         return _BUTTON_ICON_SIZE + _BUTTON_ICON_GAP
 
     def _glow_pad(self) -> int:
-        if self._compact or self._style != "Accent.TButton":
+        if not self._enabled or self._compact or self._style != "Accent.TButton":
             return 0
         if not getattr(theme, "accent_is_luminous", lambda: False)():
             return 0
@@ -376,7 +417,10 @@ class RoundedButton(tk.Canvas):
             return
         spec = _BUTTON_STYLES[self._style]
         parent_bg = self.cget("bg") or theme.APP_BG
-        token = spec["press"] if self._pressed else spec["hover"] if self._hover else spec["bg"]
+        if self._enabled:
+            token = spec["press"] if self._pressed else spec["hover"] if self._hover else spec["bg"]
+        else:
+            token = spec["bg"]
         if self._compact:
             # Idle circle matches the parent so +/− / ‹ › read as glyphs,
             # not as a square plate with a round button drawn inside.
@@ -388,11 +432,17 @@ class RoundedButton(tk.Canvas):
             fill = _style_color(token, parent_bg)
             outline = _style_color(spec["border"], parent_bg) if spec["border"] else ""
         fg = _style_color(spec["fg"], parent_bg)
+        if not self._enabled:
+            fill = theme._mix(fill, parent_bg, 0.55)
+            if outline:
+                outline = theme._mix(outline, parent_bg, 0.55)
+            fg = theme._mix(fg, parent_bg, 0.45)
         # Stadium, not a rounded rectangle: the same pill Today / Synced
         # already had because they were short enough for BUTTON_RADIUS to
         # look circular. Taller accent labels used to look like slabs.
         radius = min(w, h) / 2.0
-        luminous = (self._style == "Accent.TButton" and not self._compact
+        luminous = (self._enabled and self._style == "Accent.TButton"
+                    and not self._compact
                     and getattr(theme, "accent_is_luminous", lambda: False)())
         fill_end = ""
         if luminous:
@@ -435,17 +485,25 @@ class RoundedButton(tk.Canvas):
                 fill=fill, outline=outline, width=1 if outline else 0)
         f = self._font()
         icon_span = self._icon_span()
+        if self._icon and not self._text:
+            glyph = min(_BUTTON_ICON_SIZE + 4, h * 0.52)
+            draw_button_icon(
+                self, self._icon, w / 2.0, h / 2.0, glyph, fg,
+                background=fill)
+            return
         text_x = w / 2.0 + icon_span / 2.0
         if self._icon:
             text_w = f.measure(self._text)
             icon_cx = text_x - text_w / 2.0 - _BUTTON_ICON_GAP - _BUTTON_ICON_SIZE / 2.0
             draw_button_icon(
                 self, self._icon, icon_cx, h / 2.0, _BUTTON_ICON_SIZE, fg,
-                background=parent_bg)
+                background=fill)
         self.create_text(text_x, h / 2, text=self._text, fill=fg, font=f, anchor="center")
 
     # -- interaction ------------------------------------------------------
     def _on_enter(self, _event=None):
+        if not self._enabled:
+            return
         self._hover = True
         self._redraw()
 
@@ -455,6 +513,8 @@ class RoundedButton(tk.Canvas):
         self._redraw()
 
     def _on_press(self, _event=None):
+        if not self._enabled:
+            return
         self._pressed = True
         self._redraw()
 
@@ -462,7 +522,8 @@ class RoundedButton(tk.Canvas):
         was_pressed = self._pressed
         self._pressed = False
         self._redraw()
-        if was_pressed and event is not None and self._command is not None:
+        if (self._enabled and was_pressed and event is not None
+                and self._command is not None):
             if 0 <= event.x <= self.winfo_width() and 0 <= event.y <= self.winfo_height():
                 self._command()
 
@@ -470,7 +531,7 @@ class RoundedButton(tk.Canvas):
         """Matches ttk.Button.invoke() -- fires the command directly,
         without needing a synthetic click. Used by nothing in this app
         today, kept for API parity / future tests."""
-        if self._command is not None:
+        if self._enabled and self._command is not None:
             self._command()
 
 
