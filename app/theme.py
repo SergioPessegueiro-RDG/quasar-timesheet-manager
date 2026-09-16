@@ -33,6 +33,7 @@ same proportional relationships the original seven hand-tuned palettes
 actually had (verified by measuring them before writing this).
 """
 import math
+import os
 import subprocess
 import sys
 import tkinter as tk
@@ -924,7 +925,7 @@ def apply_theme(root):
 
 # macOS traffic lights sit in the top-left of a full-size content view
 # (TickTick / VS Code "hidden inset" titlebar). Content must pad past them.
-MAC_TRAFFIC_INSET_PX = 70
+MAC_TRAFFIC_INSET_PX = 92
 MAC_TITLEBAR_PX = 28
 
 
@@ -963,17 +964,15 @@ def apply_window_chrome(root):
         return
 
 
-# Glass / rice themes drop the whole window's opacity so the desktop
-# shows through (Tk has no per-widget blur). 1.0 = opaque. Linux needs a
-# compositor (Picom, Hyprland, KWin) for this to be visible.
-#
-# The user-chosen value is shared across Frosted / Picom / Hypr so a
-# slider in Settings can keep text readable. Floor is high enough that
-# labels don't wash out.
+# Glass / rice themes originally owned window opacity; the Translucency
+# slider now applies to every theme so a dark desktop can show through
+# White, Custom, Frosted, etc. 1.0 = opaque. Linux needs a compositor
+# (Picom, Hyprland, KWin) for this to be visible. Floor stays high
+# enough that labels don't wash out.
 GLASS_THEME_IDS = frozenset({"frosted", "picom", "hypr"})
 WINDOW_ALPHA_MIN = 0.88
 WINDOW_ALPHA_MAX = 1.0
-WINDOW_ALPHA_DEFAULT = 0.95
+WINDOW_ALPHA_DEFAULT = 0.995
 _glass_alpha = WINDOW_ALPHA_DEFAULT
 
 
@@ -1007,14 +1006,11 @@ def set_glass_alpha(value) -> float:
 
 
 def window_alpha(theme_id: str = None) -> float:
-    tid = resolve_theme_id(theme_id if theme_id is not None else CURRENT_THEME_ID)
-    if tid not in GLASS_THEME_IDS:
-        return 1.0
     return _glass_alpha
 
 
 def apply_window_opacity(root, theme_id: str = None):
-    """Set wm -alpha for Glass themes; restore full opacity otherwise."""
+    """Set wm -alpha from the Translucency slider (every theme)."""
     alpha = window_alpha(theme_id)
     try:
         root.wm_attributes("-alpha", alpha)
@@ -1033,137 +1029,40 @@ def themed_titlebar_left_pad() -> int:
 # ---------------------------------------------------------------------------
 # Canvas drawing helpers
 # ---------------------------------------------------------------------------
-def _ring_points(cx, cy, rx, ry, rot_deg, start_deg=0, end_deg=360, steps=None):
-    """Sample points along a (possibly partial) ellipse centered at
-    (cx, cy) and rotated by rot_deg -- used to build every tilted ring/arc
-    in draw_logo_mark below. Tkinter's create_oval/create_arc only draw
-    axis-aligned shapes, so a tilted one has to be built as a plain point
-    list fed to create_line instead; like rounded_rect() above, this
-    samples real trigonometric points rather than using
-    create_line(..., smooth=True), which approximates a spline *near* its
-    control points rather than through them (see rounded_rect's docstring
-    for the visible artifacts that caused, on a Retina display in
-    particular).
+def _asset_path(name: str) -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.join(sys._MEIPASS, "app", "assets", name)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", name)
 
-    Unlike rounded_rect's angle convention (0=east/90=north, with y
-    flipped to compensate for the canvas's y-down coordinate space), this
-    works entirely in plain screen/canvas coordinates with no flip, and
-    angles/rotation match SVG's rotate() transform directly. That's
-    because this mark's proportions were designed and approved as an SVG
-    mockup first -- porting those numbers verbatim was the lower-risk way
-    to reproduce the design exactly, rather than translating them into a
-    different convention by hand.
 
-    Returns a flat [x1, y1, x2, y2, ...] list, ready for
-    canvas.create_line(*points, ...)."""
-    if steps is None:
-        steps = max(8, round(abs(end_deg - start_deg) / 5))
-    rot = math.radians(rot_deg)
-    cos_r, sin_r = math.cos(rot), math.sin(rot)
-    points = []
-    for i in range(steps + 1):
-        theta = math.radians(start_deg + (end_deg - start_deg) * i / steps)
-        x0 = rx * math.cos(theta)
-        y0 = ry * math.sin(theta)
-        points.append(cx + x0 * cos_r - y0 * sin_r)
-        points.append(cy + x0 * sin_r + y0 * cos_r)
-    return points
+def _logo_asset_path() -> str:
+    return _asset_path("logo.png")
+
+
+def _app_icon_path() -> str:
+    return _asset_path("app_icon.png")
 
 
 def draw_logo_mark(canvas, size=28, pad=1):
-    """Draw the QUASAR mark: a clock-faced core sphere wrapped in a
-    tilted, Saturn-style ring system with a bright shooting-star taper on
-    its near edge, plus a scattering of small stars. Deliberately not an
-    emoji or symbol-font glyph, since those aren't reliably available on
-    every machine (headless/minimal Linux installs in particular).
+    """Paint the bundled app mark (app/assets/logo.png) onto the header canvas.
 
-    Tkinter has no native support for rotated ellipses, real alpha
-    blending, or blur, so every tilted ring/arc here is a point-sampled
-    line (see _ring_points above) and every "opacity" from the original
-    design is faked with a solid color pre-blended toward whatever
-    actually sits behind that shape -- the canvas's own background for
-    anything drawn on empty space, or ACCENT for anything drawn over the
-    opaque sphere -- via the _mix() helper near the top of this module.
-    packaging/make_icons.py draws the same design again independently,
-    using Pillow's real compositing and rotation for the packaged app
-    icon; the two aren't shared code, so a future redesign needs both
-    updated.
-
-    Uses the module's live ACCENT (not a fixed color), so this header
-    mark re-themes along with everything else when the user picks a
-    different theme; make_icons.py's packaged icon stays a fixed brand
-    blue instead, since that one can't change after the app is built."""
+    The Dock / installer icon is the same artwork, generated from
+    packaging/icons/source.png by packaging/make_icons.py.
+    """
     canvas.delete("all")
-    scale = (size - 2 * pad) / 120.0
-    bg = PANEL_BG  # this canvas's own background -- see main_window.py's construction
-
-    def X(x):
-        return pad + x * scale
-
-    def Y(y):
-        return pad + y * scale
-
-    def W(width):
-        return max(1.0, width * scale)
-
-    def line(points, **kwargs):
-        canvas.create_line(*(X(p) if i % 2 == 0 else Y(p) for i, p in enumerate(points)), **kwargs)
-
-    def polygon(points, **kwargs):
-        canvas.create_polygon(*(X(p) if i % 2 == 0 else Y(p) for i, p in enumerate(points)), **kwargs)
-
-    # ---- Saturn-style ring system (back pass, behind the sphere) -------
-    ring_cx, ring_cy, ring_rot = 60, 66, -20
-    line(_ring_points(ring_cx, ring_cy, 60, 11, ring_rot),
-         fill=_mix(bg, ACCENT, 0.28), width=W(2), dash=(2, 5))
-    line(_ring_points(ring_cx, ring_cy, 54, 9.5, ring_rot),
-         fill=_mix(bg, ACCENT, 0.42), width=W(2.5))
-    line(_ring_points(ring_cx, ring_cy, 48, 8, ring_rot),
-         fill=_mix(bg, ACCENT, 0.5), width=W(5), capstyle="round")
-
-    # ---- core sphere -----------------------------------------------------
-    sx, sy, r = 60, 50, 25
-    canvas.create_oval(X(sx - r), Y(sy - r), X(sx + r), Y(sy + r), fill=ACCENT, outline="")
-
-    # ---- watch-face bezel: semi-transparent white over the sphere -------
-    br = 19.5
-    canvas.create_oval(X(sx - br), Y(sy - br), X(sx + br), Y(sy + br),
-                        outline=_mix(ACCENT, "#FFFFFF", 0.3), width=W(1.5))
-
-    # ---- clock hands, fixed at 10:10 (the classic "friendly" clock
-    # position) -- the timesheet reference the halo design was missing.
-    canvas.create_line(X(sx), Y(sy), X(52.6), Y(44.8), fill="white", width=W(3.6), capstyle="round")
-    canvas.create_line(X(sx), Y(sy), X(72.1), Y(43), fill="white", width=W(3.6), capstyle="round")
-    cr = 2.4
-    canvas.create_oval(X(sx - cr), Y(sy - cr), X(sx + cr), Y(sy + cr), fill="white", outline="")
-
-    # ---- the ring's front/near edge, tapering from dim to a bright
-    # near-white point like a shooting star -- three nested partial arcs
-    # sharing the same start angle, each shorter and brighter than the
-    # last, each pre-blended against ACCENT (what they're actually drawn
-    # over) instead of the canvas background.
-    line(_ring_points(ring_cx, ring_cy, 48, 8, ring_rot, 20, 160),
-         fill=_mix(ACCENT, "#6EA0FF", 0.55), width=W(4), capstyle="round")
-    line(_ring_points(ring_cx, ring_cy, 48, 8, ring_rot, 20, 100),
-         fill=_mix(ACCENT, "#B7D0FF", 0.8), width=W(3.5), capstyle="round")
-    line(_ring_points(ring_cx, ring_cy, 48, 8, ring_rot, 20, 60),
-         fill="#F3F8FF", width=W(3), capstyle="round")
-
-    # ---- a scattered handful of stars for the "in space" feel -- each
-    # sits on empty background, so blended toward `bg` rather than ACCENT.
-    def sparkle(cx, cy, long_r, short_r, alpha):
-        k = short_r * 0.70710678  # short_r at 45 degrees
-        polygon([cx, cy - long_r, cx + k, cy - k, cx + long_r, cy,
-                 cx + k, cy + k, cx, cy + long_r, cx - k, cy + k,
-                 cx - long_r, cy, cx - k, cy - k],
-                fill=_mix(bg, "#FFFFFF", alpha), outline="")
-
-    sparkle(100, 18, 6, 2, 0.9)
-    sparkle(14, 24, 3, 1, 0.55)
-    sparkle(10, 100, 3.5, 1.2, 0.6)
-    dot_r = 1.8
-    canvas.create_oval(X(108 - dot_r), Y(102 - dot_r), X(108 + dot_r), Y(102 + dot_r),
-                        fill=_mix(bg, "#FFFFFF", 0.5), outline="")
+    path = _logo_asset_path()
+    if not os.path.isfile(path):
+        return
+    try:
+        photo = tk.PhotoImage(file=path)
+    except tk.TclError:
+        return
+    inner = max(1, int(size) - 2 * int(pad))
+    factor = max(1, int(photo.width()) // inner)
+    if factor > 1:
+        photo = photo.subsample(factor)
+    canvas.create_image(int(size) // 2, int(size) // 2, image=photo, anchor="center")
+    canvas._logo_photo = photo
 
 
 def draw_theme_swatch(canvas, theme_id: str, selected: bool, width=132, height=88):

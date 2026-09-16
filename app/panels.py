@@ -23,6 +23,7 @@ from typing import Callable, Dict, List, Optional, Union
 from . import config, theme
 from .models import Activity, Project, TemplateEntry, TimeEntry
 from .version import APP_VERSION
+from .welcome import add_jira_api_token_link
 from .widgets import (
     RoundedButton, RoundedCard, RoundedCheckbutton, RoundedCombobox, RoundedEntry,
     ScrollArea, segmented_button_style, show_saved_toast,
@@ -572,8 +573,81 @@ class ProjectPanel(tk.Frame):
 
 
 # ---------------------------------------------------------------------------
-# Settings panel (Display Name, work hours, theme)
+# Settings panel (Jira, work calendar, hours, theme)
 # ---------------------------------------------------------------------------
+class _TranslucencySlider(tk.Canvas):
+    """Horizontal percent slider drawn on a Canvas.
+
+    macOS tk.Scale ignores troughcolor / slider colors, so the thumb
+    disappears against a dark Settings card. Track + thumb are painted
+    with the same rounded fills as the rest of the app.
+    """
+
+    _PAD = 10
+    _TRACK_H = 6
+    _THUMB_R = 8
+
+    def __init__(self, master, *, from_value: float, to_value: float,
+                 value: float, command: Callable, bg: str):
+        super().__init__(master, height=28, highlightthickness=0, bg=bg,
+                         cursor="sb_h_double_arrow")
+        self._from = float(from_value)
+        self._to = float(to_value)
+        self._value = float(value)
+        self._command = command
+        self._bg = bg
+        self.bind("<Configure>", lambda e: self._redraw())
+        self.bind("<Button-1>", self._on_pointer)
+        self.bind("<B1-Motion>", self._on_pointer)
+
+    def set(self, value: float):
+        self._value = max(self._from, min(self._to, float(value)))
+        self._redraw()
+
+    def get(self) -> float:
+        return self._value
+
+    def _fraction(self) -> float:
+        span = self._to - self._from
+        if span <= 0:
+            return 1.0
+        return (self._value - self._from) / span
+
+    def _on_pointer(self, event):
+        w = max(self.winfo_width(), 1)
+        x0 = self._PAD
+        x1 = max(x0 + 1, w - self._PAD)
+        t = (event.x - x0) / (x1 - x0)
+        t = max(0.0, min(1.0, t))
+        value = round(self._from + t * (self._to - self._from), 1)
+        self.set(value)
+        if self._command:
+            self._command(value)
+
+    def _redraw(self):
+        self.delete("all")
+        w, h = self.winfo_width(), self.winfo_height()
+        if w <= 2:
+            return
+        y = h // 2
+        x0, x1 = self._PAD, w - self._PAD
+        track_y0 = y - self._TRACK_H // 2
+        track_y1 = y + self._TRACK_H // 2
+        theme.place_rounded_rect(
+            self, x0, track_y0, x1, track_y1, radius=3,
+            fill=theme.FIELD_BG, outline="", background=self._bg)
+        fill_x = x0 + self._fraction() * (x1 - x0)
+        if fill_x - x0 >= 4:
+            theme.place_rounded_rect(
+                self, x0, track_y0, fill_x, track_y1, radius=3,
+                fill=theme.ACCENT, outline="", background=self._bg)
+        r = self._THUMB_R
+        theme.place_rounded_rect(
+            self, fill_x - r, y - r, fill_x + r, y + r, radius=r,
+            fill=theme.ACCENT, outline=theme.BORDER_STRONG, width=1,
+            background=self._bg)
+
+
 class SettingsPanel(tk.Frame):
     def __init__(self, master, family: str, on_close: Callable[[], None]):
         super().__init__(master, bg=theme.APP_BG)
@@ -609,7 +683,7 @@ class SettingsPanel(tk.Frame):
                  bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY).grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 24))
 
-        # Left column: Display Name, Work Hours, Theme -- the settings
+        # Left column: Jira, Work Calendar, hours, theme -- the settings
         # someone actually edits. Right column: Keyboard Shortcuts --
         # reference material glanced at rather than changed, so it doesn't
         # need to sit above the fold underneath everything else; putting
@@ -651,21 +725,16 @@ class SettingsPanel(tk.Frame):
         outer.bind("<Configure>", self._reflow_settings_columns)
         outer.after_idle(self._reflow_settings_columns)
 
-        name_card = _settings_card(left, 0)
-        _settings_heading(name_card, "Display Name", self.family)
-        _settings_hint(name_card, "Appears in every exported row.", self.family, 1)
-        self.display_name_var = tk.StringVar()
-        RoundedEntry(name_card, textvariable=self.display_name_var, width=36,
-                     bg=theme.SURFACE).grid(row=2, column=0, sticky="ew")
-
-        jira_card = _settings_card(left, 1)
+        jira_card = _settings_card(left, 0)
         _settings_heading(jira_card, "Jira", self.family)
         _settings_hint(
             jira_card,
-            "Paste an API token (Atlassian account → Security → API tokens). "
+            "Paste an API token from your Atlassian account. "
             "Site URL can be https://your-company.atlassian.net or any "
             "dashboard / board link — extra path is stripped. Sync pulls "
-            "open QDMs assigned to you. The token never leaves this machine.",
+            "open QDMs assigned to you. Your display name comes from Jira "
+            "when you test the connection (CSV export only). The token "
+            "never leaves this machine.",
             self.family, 1)
         jira_fields = tk.Frame(jira_card, bg=theme.SURFACE)
         jira_fields.grid(row=2, column=0, columnspan=2, sticky="ew")
@@ -689,7 +758,7 @@ class SettingsPanel(tk.Frame):
         tk.Label(jira_fields, text="API token", bg=theme.SURFACE, fg=theme.TEXT_PRIMARY,
                  font=(self.family, 10)).grid(row=3, column=0, sticky="w", pady=(0, 6))
         token_row = tk.Frame(jira_fields, bg=theme.SURFACE)
-        token_row.grid(row=3, column=1, sticky="ew", padx=(12, 0), pady=(0, 12))
+        token_row.grid(row=3, column=1, sticky="ew", padx=(12, 0), pady=(0, 4))
         token_row.columnconfigure(0, weight=1)
         self.jira_token_var = tk.StringVar()
         self.jira_token_entry = RoundedEntry(
@@ -698,27 +767,36 @@ class SettingsPanel(tk.Frame):
         self._jira_token_visible = False
         RoundedButton(token_row, text="Show", style="Secondary.TButton",
                       command=self._toggle_jira_token, bg=theme.SURFACE).pack(side="left", padx=(8, 0))
+        add_jira_api_token_link(jira_fields, self.family).grid(
+            row=4, column=1, sticky="w", padx=(12, 0), pady=(0, 12))
 
         tk.Label(jira_fields, text="Project key", bg=theme.SURFACE, fg=theme.TEXT_PRIMARY,
-                 font=(self.family, 10)).grid(row=4, column=0, sticky="w", pady=(0, 6))
+                 font=(self.family, 10)).grid(row=5, column=0, sticky="w", pady=(0, 6))
         self.jira_project_key_var = tk.StringVar(value="QDM")
         RoundedEntry(jira_fields, textvariable=self.jira_project_key_var, width=12,
-                     bg=theme.SURFACE).grid(row=4, column=1, sticky="w", padx=(12, 0), pady=(0, 12))
+                     bg=theme.SURFACE).grid(row=5, column=1, sticky="w", padx=(12, 0), pady=(0, 12))
 
         jira_btns = tk.Frame(jira_fields, bg=theme.SURFACE)
-        jira_btns.grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        jira_btns.grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 4))
         RoundedButton(jira_btns, text="Test connection", style="Secondary.TButton",
                       command=self._test_jira, bg=theme.SURFACE).pack(side="left")
         RoundedButton(jira_btns, text="Sync QDMs now", style="Accent.TButton",
                       command=self._sync_jira, bg=theme.SURFACE).pack(side="left", padx=(8, 0))
+        RoundedButton(jira_btns, text="Welcome setup…", style="Secondary.TButton",
+                      command=self._open_welcome, bg=theme.SURFACE).pack(side="left", padx=(8, 0))
         self.jira_status_label = tk.Label(jira_fields, text="", fg=theme.TEXT_SECONDARY,
                                            bg=theme.SURFACE, font=(self.family, 9),
                                            wraplength=420, justify="left")
-        self.jira_status_label.grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.jira_status_label.grid(row=7, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.jira_name_label = tk.Label(jira_fields, text="", fg=theme.TEXT_MUTED,
+                                         bg=theme.SURFACE, font=(self.family, 9),
+                                         wraplength=420, justify="left")
+        self.jira_name_label.grid(row=8, column=0, columnspan=2, sticky="w", pady=(2, 0))
         self.on_test_jira: Optional[Callable[[dict], None]] = None
         self.on_sync_jira: Optional[Callable[[dict], None]] = None
+        self.on_show_welcome: Optional[Callable[[], None]] = None
 
-        calendar_card = _settings_card(left, 2)
+        calendar_card = _settings_card(left, 1)
         _settings_heading(calendar_card, "Work Calendar", self.family)
         _settings_hint(
             calendar_card,
@@ -764,7 +842,7 @@ class SettingsPanel(tk.Frame):
         self.calendar_status_label.grid(row=6, column=0, sticky="w", pady=(4, 0))
         self.on_refresh_calendar: Optional[Callable[[dict], None]] = None
 
-        hours_card = _settings_card(left, 3)
+        hours_card = _settings_card(left, 2)
         _settings_heading(hours_card, "Work Hours", self.family)
         _settings_hint(
             hours_card,
@@ -807,7 +885,7 @@ class SettingsPanel(tk.Frame):
                  fg=theme.TEXT_MUTED, bg=theme.SURFACE, justify="left", wraplength=420,
                  font=(self.family, 9)).grid(row=5, column=0, columnspan=2, sticky="w")
 
-        heading_card = _settings_card(left, 4)
+        heading_card = _settings_card(left, 3)
         _settings_heading(heading_card, "Heading", self.family)
         _settings_hint(
             heading_card,
@@ -825,7 +903,7 @@ class SettingsPanel(tk.Frame):
             btn.pack(side="left", padx=(0, 6))
             self.header_style_buttons[key] = btn
 
-        theme_card = _settings_card(left, 5, pady=(0, 0))
+        theme_card = _settings_card(left, 4, pady=(0, 0))
         _settings_heading(theme_card, "Theme", self.family)
         self.theme_description_label = tk.Label(
             theme_card, text="", fg=theme.TEXT_MUTED, bg=theme.SURFACE, justify="left",
@@ -883,6 +961,14 @@ class SettingsPanel(tk.Frame):
     def _toggle_jira_token(self):
         self._jira_token_visible = not self._jira_token_visible
         self.jira_token_entry.configure(show="" if self._jira_token_visible else "•")
+
+    def set_jira_display_name(self, name: str):
+        text = (name or "").strip()
+        if text:
+            self.jira_name_label.config(text=f"CSV exports use your Jira name: {text}")
+        else:
+            self.jira_name_label.config(
+                text="CSV export asks for a name only if you haven't connected Jira yet.")
 
     def jira_fields(self) -> dict:
         return {
@@ -953,6 +1039,10 @@ class SettingsPanel(tk.Frame):
     def _sync_jira(self):
         if self.on_sync_jira is not None:
             self.on_sync_jira(self.jira_fields())
+
+    def _open_welcome(self):
+        if self.on_show_welcome is not None:
+            self.on_show_welcome()
 
     def _select_header_style(self, key: str):
         """Click handler for the Standard/Compact/Hidden segmented row --
@@ -1073,14 +1163,14 @@ class SettingsPanel(tk.Frame):
         self._draw_custom_swatches()
 
     def _build_glass_alpha_controls(self):
-        """Slider for Frosted / Picom / Hypr — how see-through the window
-        is. Floor stays high enough that text remains readable."""
+        """Window opacity for every theme. Floor stays readable."""
         tk.Label(self.glass_alpha_frame, text="Translucency",
                  font=(self.family, 10, "bold"), bg=self._card_bg,
                  fg=theme.TEXT_PRIMARY).pack(anchor="w")
         tk.Label(self.glass_alpha_frame,
                  text="How much of the desktop shows through. Solid is fully opaque; "
-                      "the left end stays readable — never fully transparent.",
+                      "the left end stays readable — never fully transparent. "
+                      "Applies to every theme.",
                  fg=theme.TEXT_MUTED, bg=self._card_bg, justify="left", wraplength=480,
                  font=(self.family, 9)).pack(anchor="w", pady=(2, 8))
         row = tk.Frame(self.glass_alpha_frame, bg=self._card_bg)
@@ -1092,21 +1182,17 @@ class SettingsPanel(tk.Frame):
         self.glass_alpha_label.pack(side="right")
         tk.Label(row, text="Solid", font=(self.family, 8),
                  bg=self._card_bg, fg=theme.TEXT_MUTED).pack(side="right", padx=(0, 12))
-        lo = int(round(theme.WINDOW_ALPHA_MIN * 100))
-        hi = int(round(theme.WINDOW_ALPHA_MAX * 100))
-        self.glass_alpha_var = tk.DoubleVar(value=theme.get_glass_alpha() * 100)
-        self.glass_alpha_scale = tk.Scale(
-            self.glass_alpha_frame, from_=lo, to=hi, orient="horizontal",
-            showvalue=0, resolution=1, length=360,
-            bg=self._card_bg, fg=theme.TEXT_PRIMARY, highlightthickness=0,
-            troughcolor=theme.FIELD_BG, activebackground=theme.ACCENT,
-            sliderrelief="flat", bd=0, command=self._on_glass_alpha)
-        self.glass_alpha_scale.pack(fill="x", pady=(4, 0))
+        lo = theme.WINDOW_ALPHA_MIN * 100
+        hi = theme.WINDOW_ALPHA_MAX * 100
+        self.glass_alpha_slider = _TranslucencySlider(
+            self.glass_alpha_frame, from_value=lo, to_value=hi,
+            value=theme.get_glass_alpha() * 100,
+            command=self._on_glass_alpha, bg=self._card_bg)
+        self.glass_alpha_slider.pack(fill="x", pady=(4, 0))
         self._sync_glass_alpha_label(theme.get_glass_alpha())
 
     def _sync_glass_alpha_label(self, alpha: float):
-        pct = int(round(alpha * 100))
-        self.glass_alpha_label.config(text=f"{pct}% opaque")
+        self.glass_alpha_label.config(text=f"{alpha * 100:.1f}% opaque")
 
     def _on_glass_alpha(self, value):
         alpha = theme.set_glass_alpha(float(value) / 100.0)
@@ -1154,11 +1240,6 @@ class SettingsPanel(tk.Frame):
                 self.custom_controls_frame.grid()
             else:
                 self.custom_controls_frame.grid_remove()
-        if self.glass_alpha_frame is not None:
-            if theme.is_glass_theme(selected):
-                self.glass_alpha_frame.grid()
-            else:
-                self.glass_alpha_frame.grid_remove()
 
     @staticmethod
     def _format_hour(hour_0_23: int) -> str:
@@ -1176,12 +1257,14 @@ class SettingsPanel(tk.Frame):
               on_sync_jira: Optional[Callable[[dict], None]] = None,
               calendar_ics_url: str = "", calendar_overlay_enabled: bool = True,
               on_refresh_calendar: Optional[Callable[[dict], None]] = None,
-              calendar_ics_urls: Optional[List[str]] = None):
+              calendar_ics_urls: Optional[List[str]] = None,
+              on_show_welcome: Optional[Callable[[], None]] = None):
         self.on_save = on_save
         self.on_test_jira = on_test_jira
         self.on_sync_jira = on_sync_jira
         self.on_refresh_calendar = on_refresh_calendar
-        self.display_name_var.set(display_name)
+        self.on_show_welcome = on_show_welcome
+        self.set_jira_display_name(display_name)
         self.jira_url_var.set(jira_site_url)
         self.jira_email_var.set(jira_email)
         self.jira_token_var.set(jira_api_token)
@@ -1206,8 +1289,8 @@ class SettingsPanel(tk.Frame):
         self._custom_seeds_on_load = dict(self.custom_seeds)
         self._draw_custom_swatches()
         self._glass_alpha_on_load = theme.get_glass_alpha()
-        if hasattr(self, "glass_alpha_var"):
-            self.glass_alpha_var.set(self._glass_alpha_on_load * 100)
+        if hasattr(self, "glass_alpha_slider"):
+            self.glass_alpha_slider.set(self._glass_alpha_on_load * 100)
             self._sync_glass_alpha_label(self._glass_alpha_on_load)
         self._refresh_theme_selection()
 
@@ -1231,7 +1314,6 @@ class SettingsPanel(tk.Frame):
                 "The “To” time has to be later than the “From” time.")
             return
         self.on_save(
-            self.display_name_var.get().strip(),
             self.theme_var.get(),
             work_start_hour,
             work_end_hour,
@@ -1266,7 +1348,7 @@ class SettingsPanel(tk.Frame):
 class BackupPanel(tk.Frame):
     """Its own tab (reached from File -> Backup & Restore…) rather than a
     section inside Settings -- it was tried there first, but the Settings
-    tab's Display Name/Jira defaults/theme-grid content already fills
+    tab's Jira/theme-grid content already fills
     a normal-sized window, and Backup & Restore's own buttons plus Save/
     Cancel ended up pushed entirely off the bottom with no way to scroll to
     them. A separate tab keeps both panels comfortably short."""
@@ -1343,7 +1425,7 @@ class ExportPanel(tk.Frame):
         super().__init__(master, bg=theme.APP_BG)
         self.family = family
         self.on_close = on_close
-        self.on_export: Optional[Callable[[str, str], None]] = None
+        self.on_export: Optional[Callable[..., None]] = None
         self.on_push: Optional[Callable[[str, str], None]] = None
         self.week_start: Optional[date] = None
 
@@ -1358,8 +1440,22 @@ class ExportPanel(tk.Frame):
                  font=(self.family, 10), bg=theme.PANEL_BG, fg=theme.TEXT_SECONDARY,
                  wraplength=520, justify="left").pack(anchor="w", pady=(0, 16))
 
+        self.csv_name_frame = tk.Frame(outer, bg=theme.PANEL_BG)
+        tk.Label(self.csv_name_frame, text="Your name (CSV only)",
+                 font=(self.family, 10, "bold"), bg=theme.PANEL_BG,
+                 fg=theme.TEXT_PRIMARY).pack(anchor="w")
+        self.csv_name_var = tk.StringVar()
+        RoundedEntry(self.csv_name_frame, textvariable=self.csv_name_var, width=36,
+                     bg=theme.PANEL_BG).pack(anchor="w", pady=(6, 4))
+        tk.Label(self.csv_name_frame,
+                 text="Jira already knows your display name once you connect. "
+                      "This field is only for the CSV importer.",
+                 font=(self.family, 9), bg=theme.PANEL_BG, fg=theme.TEXT_MUTED,
+                 wraplength=520, justify="left").pack(anchor="w")
+
         frm = ttk.Frame(outer)
         frm.pack(anchor="w")
+        self._export_form = frm
 
         ttk.Label(frm, text="Export range", font=(self.family, 10, "bold")).grid(
             row=0, column=0, sticky="w", pady=(0, 8))
@@ -1391,8 +1487,9 @@ class ExportPanel(tk.Frame):
         RoundedButton(btns, text="Push to Jira", style="Ghost.TButton",
                       icon="jira", command=self._push).pack(side="right", padx=(0, 6))
 
-    def load(self, week_start: date, on_export: Callable[[str, str], None],
-              on_push: Optional[Callable[[str, str], None]] = None):
+    def load(self, week_start: date, on_export: Callable[..., None],
+              on_push: Optional[Callable[[str, str], None]] = None,
+              csv_display_name: str = ""):
         self.week_start = week_start
         self.on_export = on_export
         self.on_push = on_push
@@ -1409,6 +1506,13 @@ class ExportPanel(tk.Frame):
         self.from_entry.config(state="disabled")
         self.to_entry.config(state="disabled")
         self.error_label.config(text="")
+        stored = (csv_display_name or "").strip()
+        self.csv_name_var.set(stored)
+        if stored:
+            self.csv_name_frame.pack_forget()
+        else:
+            self.csv_name_frame.pack(anchor="w", fill="x", pady=(0, 16),
+                                     before=self._export_form)
 
     def _toggle(self):
         state = "normal" if self.scope_var.get() == "custom" else "disabled"
@@ -1439,10 +1543,15 @@ class ExportPanel(tk.Frame):
         if selected is None:
             return
         start, end = selected
+        name = self.csv_name_var.get().strip()
+        if not name:
+            self.error_label.config(
+                text="CSV rows need a display name. Connect Jira first, or type one here.")
+            return
         cb = self.on_export
         self.on_close()
         assert cb is not None
-        cb(start, end)
+        cb(start, end, name)
 
     def _push(self):
         selected = self._selected_range()

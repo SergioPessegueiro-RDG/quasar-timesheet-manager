@@ -214,9 +214,10 @@ class TestPlaceAndAtmosphereThemes(unittest.TestCase):
     def test_glass_themes_drop_window_alpha(self):
         previous = theme.get_glass_alpha()
         try:
-            theme.set_glass_alpha(0.95)
-            self.assertEqual(theme.window_alpha("white"), 1.0)
-            self.assertAlmostEqual(theme.window_alpha("picom"), 0.95)
+            theme.set_glass_alpha(0.995)
+            self.assertAlmostEqual(theme.window_alpha("white"), 0.995)
+            self.assertAlmostEqual(theme.window_alpha("picom"), 0.995)
+            self.assertAlmostEqual(theme.WINDOW_ALPHA_DEFAULT, 0.995)
             self.assertEqual(theme.clamp_glass_alpha(0.2), theme.WINDOW_ALPHA_MIN)
             self.assertEqual(theme.clamp_glass_alpha(1.5), theme.WINDOW_ALPHA_MAX)
             self.assertEqual(theme.THEMES["picom"]["category"], "Glass")
@@ -330,6 +331,29 @@ class TestRoundedWidgets(unittest.TestCase):
             self.assertEqual(_hex_bg_at(root, 0, 0, "#3AAFA9").upper(), "#3AAFA9")
             self.assertEqual(
                 _hex_bg_at(root, 0, 0, "#3AAFA9", ignore=root).upper(), "#3AAFA9")
+        finally:
+            root.destroy()
+
+
+class TestLogoMark(unittest.TestCase):
+    def test_logo_png_is_bundled(self):
+        path = theme._logo_asset_path()
+        self.assertTrue(os.path.isfile(path), path)
+
+    def test_app_icon_png_is_bundled(self):
+        path = theme._app_icon_path()
+        self.assertTrue(os.path.isfile(path), path)
+
+    def test_draw_logo_mark_paints_the_png(self):
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            canvas = tk.Canvas(root, width=28, height=28)
+            theme.draw_logo_mark(canvas, size=28)
+            self.assertTrue(hasattr(canvas, "_logo_photo"))
+            self.assertGreater(len(canvas.find_all()), 0)
         finally:
             root.destroy()
 

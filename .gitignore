@@ -4,6 +4,7 @@
 build/
 dist/
 packaging/.build-venv/
+packaging/.icons-venv/
 
 # Python
 __pycache__/

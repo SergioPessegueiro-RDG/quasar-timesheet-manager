@@ -111,6 +111,25 @@ sudo pacman -S tk                # Arch
 
 ## Using the app
 
+**First launch**
+- A two-column welcome card (Jira | Outlook calendars) asks for your
+  site URL, email, API token, and one or more ICS links. Tabs, timer,
+  and Sync stay hidden until you Continue or Skip. **Continue** stores
+  what you filled in, reads your display name from Jira, syncs QDMs,
+  and pulls meetings onto the Timesheet. **Skip for now** if you only
+  want to log hours locally — you can fill this in later under
+  **Settings → Jira** / **Work Calendar**.
+- **Settings → Welcome setup…** (also **Help → Welcome setup…**, or the
+  **Welcome setup…** button on the Jira card in Settings) opens the same
+  card again even when Jira and calendar are already saved.
+- There is no Display Name field in Settings. Jira already knows your
+  name; CSV export is the only place that still asks, and only if you
+  never connected.
+- Outlook ICS: on the **website** (outlook.office.com, not the desktop
+  app) open Settings (gear) → **View all Outlook settings** if needed →
+  **Calendar → Shared calendars → Publish a calendar**. Choose **Can
+  view all details**, Publish, and copy the `.ics` link.
+
 **Calendar**
 - Monday–Friday, 9am–5pm in 30-minute slots (edit `SLOT_MINUTES` in
   `app/config.py` for finer granularity). The grid resizes with the
@@ -173,7 +192,7 @@ focus)
   only, and refreshes automatically.
 
 **Theme**
-- **Settings → Jira Export Settings…** (or **View → Theme…**) has a
+- **Settings** (or **View → Theme…**) has a
   **System** option that follows your OS's light/dark appearance
   (default), 18 curated color themes, and a **Custom** option with its
   own color pickers. Pick one, then **Save** to apply it across the app
@@ -235,7 +254,9 @@ upgrades automatically the first time you open it.)
 
 **File → Export to Jira CSV…** opens an "Export" tab to pick the current
 week or a custom date range. Only blocks with a **Jira Issue Key** are
-exported (others are skipped, with a summary shown afterward).
+exported (others are skipped, with a summary shown afterward). If you
+never connected Jira, that tab asks for a name for the CSV rows; after
+a successful connection the name comes from Jira and the field is hidden.
 
 Columns:
 ```
@@ -252,7 +273,9 @@ Quasar Delivery Management,Sub-task,QDM-5455,2026-07-24 00:00:00,Alex Rae,1h 00m
   this app ever needs — no longer Settings-configurable, so there's
   nothing to mistype).
 - **Key** — the block's Jira Issue Key. **Date Started** — the block's
-  date at midnight. **Display Name** — set in Settings. **Time Spent
+  date at midnight. **Display Name** — your Jira display name once you
+  have connected (or the name typed on the Export tab if CSV is used
+  without Jira). **Time Spent
   (h)** — formatted like `1h 30m`. **Work Description** — the block's
   notes, or its activity name if empty.
 
@@ -285,10 +308,13 @@ app/calendar_feed.py             Outlook/Google ICS overlay (published calendar 
 app/timeblock_panel.py           embedded Add/Edit Time Block tab
 app/summary_panel.py              the Summary tab
 app/panels.py                      Duplicate/Activity/Project/Settings/Backup & Restore/Export tabs
+app/welcome.py                      first-run Jira setup overlay on the Timesheet tab
 app/sidebar.py                      activities list, grouped into collapsible projects
 app/time_rounding.py                 minute-rounding helper (unit-testable, no Tkinter)
 app/timer_bar.py                      the Timer bar
 app/main_window.py                     header + timer bar + menu + window/tab assembly
+app/assets/logo.png                    in-window header mark (generated)
+packaging/icons/                       Dock / .exe / .desktop icon files + source.png
 tests/                                 unit tests + headless UI smoke tests
 ```
 
@@ -313,6 +339,14 @@ Each script sets up its own disposable virtual environment under
 `packaging/.build-venv`, generates icons if missing, and prints where the
 app landed. `python3 app.py` keeps working alongside a packaged build
 either way.
+
+To change the app icon, drop a square PNG at
+`packaging/icons/source.png` and run `python3 packaging/make_icons.py`.
+The first run creates `packaging/.icons-venv` (Pillow lives there; it is
+not an app dependency). That rewrites `icon.png` / `icon.ico` /
+`icon.icns` and the in-window `app/assets/logo.png` plus a Dock glyph
+at `app/assets/app_icon.png`. Rebuild the packaged app for Dock /
+installer icons to pick up the new files.
 
 To update an already-installed macOS app instead of repeating this by
 hand, see "Updating the app" above (`Update and Reinstall App.command`).

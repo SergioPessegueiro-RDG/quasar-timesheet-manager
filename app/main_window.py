@@ -12,7 +12,7 @@ from datetime import date, timedelta
 from tkinter import messagebox, ttk
 from typing import Optional
 
-from . import auto_update, calendar_feed, config, jira_client, jira_sync, theme, update_check
+from . import auto_update, calendar_feed, config, jira_client, jira_sync, mac_dock, theme, update_check, welcome
 from .calendar_view import CalendarGrid
 from .db import Database
 from .export_csv import export_entries
@@ -136,6 +136,11 @@ class MainWindow(tk.Tk):
         # sat invisible for a few seconds. Wait until the window has
         # actually drawn once.
         self._ui_ready = False
+        self._welcome = None
+        self._welcome_locked = False
+        self._header_bar = None
+        self._header_sep = None
+        self._tab_row = None
 
         self._build_menu()
         self._build_top_bar()
@@ -146,6 +151,10 @@ class MainWindow(tk.Tk):
             self.deiconify()
         except tk.TclError:
             pass
+        self._apply_app_icon()
+        if sys.platform == "darwin" and not getattr(sys, "frozen", False):
+            self.after(200, self._apply_app_icon)
+            self.after(800, self._apply_app_icon)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -371,6 +380,30 @@ class MainWindow(tk.Tk):
         except tk.TclError:
             pass
 
+    def _apply_app_icon(self):
+        """Set the window / Dock icon.
+
+        Packaged macOS builds leave this to the bundle .icns. From source,
+        fill the Dock tile with the full-bleed mark so macOS clips it --
+        iconphoto would be a sharp square (or a smaller icon with a black
+        frame if we pre-round it).
+        """
+        path = theme._app_icon_path()
+        if not os.path.isfile(path):
+            path = theme._logo_asset_path()
+        if not os.path.isfile(path):
+            return
+        if sys.platform == "darwin":
+            if getattr(sys, "frozen", False):
+                return
+            mac_dock.fill_dock_tile(path)
+            return
+        try:
+            self._app_icon = tk.PhotoImage(file=path)
+            self.iconphoto(True, self._app_icon)
+        except tk.TclError:
+            pass
+
     def _log_startup_diagnostics(self):
         """Best-effort, never-blocking record of exactly what Tk thinks
         it's running on, written once per launch to
@@ -443,6 +476,7 @@ class MainWindow(tk.Tk):
 
         settings_menu = tk.Menu(menubar, tearoff=0)
         settings_menu.add_command(label="Jira & Settings…", command=self._open_settings_dialog)
+        settings_menu.add_command(label="Welcome setup…", command=self._open_welcome_setup)
         menubar.add_cascade(label="Settings", menu=settings_menu)
 
         # The old binary "Dark Mode" checkbutton lived here; it's been
@@ -454,10 +488,12 @@ class MainWindow(tk.Tk):
         # place to change it.
         view_menu = tk.Menu(menubar, tearoff=0)
         view_menu.add_command(label="Theme…", command=self._open_settings_dialog)
+        view_menu.add_command(label="Welcome setup…", command=self._open_welcome_setup)
         menubar.add_cascade(label="View", menu=view_menu)
 
         help_menu = tk.Menu(menubar, tearoff=0)
         help_menu.add_command(label="How to use", command=self._show_help)
+        help_menu.add_command(label="Welcome setup…", command=self._open_welcome_setup)
         menubar.add_cascade(label="Help", menu=help_menu)
 
         self.config(menu=menubar)
@@ -470,7 +506,7 @@ class MainWindow(tk.Tk):
     # case.
     _HEADER_PROFILES = {
         "standard": {"logo_size": 22, "canvas_px": 24, "pady": 6, "title_pt": 13},
-        "compact": {"logo_size": 16, "canvas_px": 18, "pady": 4, "title_pt": 12},
+        "compact": {"logo_size": 16, "canvas_px": 18, "pady": 8, "title_pt": 12},
     }
 
     def _build_top_bar(self, initial_timer_state=None):
@@ -483,7 +519,11 @@ class MainWindow(tk.Tk):
 
         if not show_header and not show_timer:
             if themed:
-                tk.Frame(self, bg=theme.APP_BG, height=theme.MAC_TITLEBAR_PX).pack(fill="x")
+                self._header_bar = tk.Frame(self, bg=theme.APP_BG, height=theme.MAC_TITLEBAR_PX)
+                self._header_bar.pack(fill="x")
+            else:
+                self._header_bar = None
+            self._header_sep = None
             self.timer_bar = TimerBar(
                 self, self.db, get_activities=lambda: self.db.list_activities(),
                 on_saved=self._on_timer_saved, family=self.family,
@@ -493,10 +533,18 @@ class MainWindow(tk.Tk):
 
         bar = tk.Frame(self, bg=theme.PANEL_BG)
         bar.pack(fill="x")
+        self._header_bar = bar
         pad_l = theme.themed_titlebar_left_pad() if themed else 16
+        if themed and self.header_style == "compact":
+            pad_l += 12
         profile = self._HEADER_PROFILES.get(self.header_style, self._HEADER_PROFILES["standard"])
+        pad_y = profile["pady"] if show_header else 4
+        if themed and self.header_style == "compact":
+            pad_top, pad_bot = 14, 8
+        else:
+            pad_top = pad_bot = pad_y
         inner = tk.Frame(bar, bg=theme.PANEL_BG)
-        inner.pack(fill="x", padx=(pad_l, 12), pady=profile["pady"] if show_header else 4)
+        inner.pack(fill="x", padx=(pad_l, 12), pady=(pad_top, pad_bot))
 
         if show_header:
             title_row = tk.Frame(inner, bg=theme.PANEL_BG)
@@ -533,6 +581,7 @@ class MainWindow(tk.Tk):
 
         sep = tk.Frame(self, bg=theme.BORDER, height=1)
         sep.pack(fill="x")
+        self._header_sep = sep
 
     def _prompt_timer_notes(self, activity, date_str: str, start_str: str, end_str: str):
         """Stop-timer path: same Time Block description prompt as placing a QDM."""
@@ -748,6 +797,14 @@ class MainWindow(tk.Tk):
         self.project_panel = None
         self.backup_panel = None
         self.export_panel = None
+        old_welcome = getattr(self, "_welcome", None)
+        self._welcome = None
+        self._welcome_locked = False
+        if old_welcome is not None:
+            try:
+                old_welcome.destroy()
+            except tk.TclError:
+                pass
 
         tab_row = tk.Frame(self, bg=theme.APP_BG)
         # Equal gap above and below -- it used to be flush against the
@@ -755,6 +812,7 @@ class MainWindow(tk.Tk):
         # 8px before the notebook/content card below, which read as
         # crowded against the Timer section and lopsided against the card.
         tab_row.pack(fill="x", padx=16, pady=(10, 10))
+        self._tab_row = tab_row
 
         self.push_btn = RoundedButton(
             tab_row, text="Synced", style="Ghost.TButton",
@@ -824,6 +882,7 @@ class MainWindow(tk.Tk):
 
         self.calendar.refresh = _refresh_then_push
         self._place_sidebar_and_calendar(body, self.sidebar, self.calendar)
+        self._maybe_show_welcome()
         self._refresh_push_button()
         self.sidebar.set_calendar(self.calendar)
         # Template / Summary / Settings / dialogs are built after the
@@ -1017,16 +1076,26 @@ class MainWindow(tk.Tk):
         return getattr(self, "sidebar", None)
 
     def _add_qdm(self):
+        if self._welcome_blocks_app():
+            return
         sb = self._active_sidebar()
         if sb is not None:
             sb._add_activity()
 
     def _add_project(self):
+        if self._welcome_blocks_app():
+            return
         sb = self._active_sidebar()
         if sb is not None:
             sb._add_project()
 
     def _on_tab_changed(self, event=None):
+        if getattr(self, "_welcome_locked", False):
+            try:
+                self.notebook.select(self.timesheet_tab)
+            except tk.TclError:
+                pass
+            return
         try:
             current = self.notebook.select()
         except tk.TclError:
@@ -1156,6 +1225,8 @@ class MainWindow(tk.Tk):
             ).pack(side="left", padx=(0, 6))
 
     def _show_panel(self, widget):
+        if self._welcome_blocks_app():
+            return
         # Only one extra tab is ever shown at a time, alongside "Timesheet".
         for other in self._panels:
             if other is not widget:
@@ -1168,6 +1239,8 @@ class MainWindow(tk.Tk):
         self.notebook.select(0)
 
     def _open_time_block_panel(self, **kwargs):
+        if self._welcome_blocks_app():
+            return
         self._ensure_secondary_tabs(now=True)
         kwargs["known_jira_projects"] = self.db.list_known_jira_projects()
         inner_save = kwargs.get("on_save")
@@ -1299,17 +1372,18 @@ class MainWindow(tk.Tk):
         current_show_timer_bar = self.show_timer_bar
         current_header_style = self.header_style
 
-        def on_save(new_display_name, new_theme_id,
+        def on_save(new_theme_id,
                     new_work_start_hour, new_work_end_hour, new_show_weekends,
                     new_show_timer_bar, new_header_style, jira_fields=None,
                     calendar_fields=None):
-            self.db.set_setting("jira_display_name", new_display_name)
             self.db.set_setting("work_start_hour", str(new_work_start_hour))
             self.db.set_setting("work_end_hour", str(new_work_end_hour))
             self.db.set_setting("show_weekends", "1" if new_show_weekends else "0")
             self.db.set_setting("show_timer_bar", "1" if new_show_timer_bar else "0")
             self.db.set_setting("header_style", new_header_style)
             self._persist_jira_fields(jira_fields or {})
+            if self._jira_creds().is_complete():
+                self._mark_welcome_done()
             old_calendar_urls = calendar_feed.saved_ics_urls(self.db.get_setting)
             self._persist_calendar_fields(calendar_fields or {})
             new_calendar_urls = calendar_feed.saved_ics_urls(self.db.get_setting)
@@ -1325,7 +1399,7 @@ class MainWindow(tk.Tk):
             self.db.set_setting("custom_theme_panel_bg", custom_seeds["panel_bg"])
             self.db.set_setting("custom_theme_text", custom_seeds["text_primary"])
             self.db.set_setting("custom_theme_accent", custom_seeds["accent"])
-            self.db.set_setting("glass_alpha", f"{theme.get_glass_alpha():.2f}")
+            self.db.set_setting("glass_alpha", f"{theme.get_glass_alpha():.3f}")
 
             hours_changed = (new_work_start_hour != current_work_start_hour
                               or new_work_end_hour != current_work_end_hour
@@ -1377,6 +1451,7 @@ class MainWindow(tk.Tk):
             jira_project_key=self.db.get_setting("jira_project_key", "QDM") or "QDM",
             on_test_jira=self._test_jira_connection,
             on_sync_jira=self._sync_qdms_from_jira_fields,
+            on_show_welcome=self._open_welcome_setup,
             calendar_ics_urls=calendar_feed.saved_ics_urls(self.db.get_setting),
             calendar_overlay_enabled=self._calendar_overlay_enabled,
             on_refresh_calendar=self._refresh_calendar_from_settings,
@@ -1385,15 +1460,19 @@ class MainWindow(tk.Tk):
             self.settings_panel.calendar_status_label.config(text=self._calendar_status_text)
 
     def _open_settings_dialog(self):
+        if self._welcome_blocks_app():
+            return
         # Settings is a permanent tab now (see _build_body) -- this just
         # jumps the notebook to it, still wired up from the Settings/View
-        # menu's "Jira Export Settings…"/"Theme…" entries now that the
+        # menu's "Jira & Settings…"/"Theme…" entries now that the
         # header button that used to call this is gone.
         self._ensure_secondary_tabs(now=True)
         self._load_settings_panel()
         self.notebook.select(self.settings_tab)
 
     def _open_backup_dialog(self):
+        if self._welcome_blocks_app():
+            return
         self._ensure_secondary_tabs(now=True)
         self._show_panel(self.backup_panel)
 
@@ -1453,20 +1532,24 @@ class MainWindow(tk.Tk):
             pass
 
     def _push_visible_week(self):
-        if not hasattr(self, "calendar"):
+        if self._welcome_blocks_app() or not hasattr(self, "calendar"):
             return
         start, end = self._visible_week_range()
         self._push_hours_to_jira(start, end)
 
     def _open_export_dialog(self):
+        if self._welcome_blocks_app():
+            return
         self._ensure_secondary_tabs(now=True)
-        def on_export(start_date, end_date):
-            self._do_export(start_date, end_date)
+        def on_export(start_date, end_date, csv_name=""):
+            self._do_export(start_date, end_date, csv_name=csv_name)
 
         def on_push(start_date, end_date):
             self._push_hours_to_jira(start_date, end_date)
 
-        self.export_panel.load(self.calendar.week_start, on_export, on_push=on_push)
+        self.export_panel.load(
+            self.calendar.week_start, on_export, on_push=on_push,
+            csv_display_name=self.db.get_setting("jira_display_name", "") or "")
         self._show_panel(self.export_panel)
 
     def _persist_jira_fields(self, fields: dict):
@@ -1522,6 +1605,8 @@ class MainWindow(tk.Tk):
             pass
 
     def _refresh_calendar_feed_on_startup(self):
+        if self._welcome_blocks_app():
+            return
         self._refresh_calendar_feed(quiet=True)
 
     def _refresh_calendar_from_settings(self, fields: dict):
@@ -1690,15 +1775,26 @@ class MainWindow(tk.Tk):
                     pass
             except tk.TclError:
                 pass
+        overlay = getattr(self, "_welcome", None)
+        if overlay is not None:
+            try:
+                overlay.set_busy(busy)
+                if status:
+                    overlay.set_status(status)
+            except tk.TclError:
+                pass
 
-    def _test_jira_connection(self, fields: dict):
+    def _test_jira_connection(self, fields: dict, *, from_welcome: bool = False):
         creds = self._jira_creds(fields)
         if not creds.is_complete():
-            self._jira_alert(
-                "Jira",
+            msg = (
                 "Need a site URL and API token first.\n\n"
                 "Create a token at https://id.atlassian.com/manage-profile/security/api-tokens "
                 "and paste it in Settings, or set QUASAR_JIRA_TOKEN.")
+            if from_welcome:
+                self._set_jira_busy(False, "Need a site URL and API token.")
+                return
+            self._jira_alert("Jira", msg)
             return
 
         self._set_jira_busy(True, "Testing connection…")
@@ -1709,27 +1805,176 @@ class MainWindow(tk.Tk):
             except Exception as exc:
                 err = str(exc)
                 jira_client._log(f"test_connection failed: {type(exc).__name__}: {exc}")
-                self._call_on_ui(lambda err=err: self._jira_job_failed("Jira", err))
+                self._call_on_ui(
+                    lambda err=err: self._jira_job_failed("Jira", err, from_welcome=from_welcome))
                 return
-            self._call_on_ui(lambda: self._jira_test_ok(name))
+            self._call_on_ui(lambda: self._jira_test_ok(name, from_welcome=from_welcome))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _jira_test_ok(self, name: str):
-        self._set_jira_busy(False, f"Connected as {name}.")
+    def _jira_test_ok(self, name: str, *, from_welcome: bool = False):
+        name = (name or "").strip()
+        if name:
+            self.db.set_setting("jira_display_name", name)
+            settings = getattr(self, "settings_panel", None)
+            if settings is not None:
+                try:
+                    settings.set_jira_display_name(name)
+                except tk.TclError:
+                    pass
+        self._set_jira_busy(False, f"Connected as {name}." if name else "Connected.")
+        self._mark_welcome_done()
+        if from_welcome:
+            self._sync_qdms_from_jira_fields(None, quiet=True)
+            self.after(0, lambda: self._refresh_calendar_feed(quiet=True))
+            return
         self._jira_alert(
             "Jira",
             f"Connected as {name}. Sync QDMs only reads your assigned issues — "
             "it does not change anything in Jira.",
             kind="info")
 
-    def _jira_job_failed(self, title: str, err: str, quiet: bool = False):
+    def _jira_job_failed(self, title: str, err: str, quiet: bool = False, *,
+                         from_welcome: bool = False):
         self._jira_sync_in_flight = False
-        self._set_jira_busy(False, err, quiet=quiet)
+        self._set_jira_busy(False, err, quiet=quiet and not from_welcome)
+        if from_welcome:
+            return
         if quiet:
             jira_client._log(f"startup sync failed: {err}")
             return
         self._jira_alert(title, err)
+
+    def _maybe_show_welcome(self):
+        self._show_welcome(force=False)
+
+    def _open_welcome_setup(self):
+        """Re-open the first-run card with whatever is already saved.
+
+        Settings → Welcome setup… is for walking through the flow again
+        on an install that already has Jira / calendar filled in.
+        """
+        self._show_welcome(force=True)
+
+    def _show_welcome(self, *, force: bool = False):
+        overlay = getattr(self, "_welcome", None)
+        if overlay is not None:
+            try:
+                overlay.lift()
+                self._apply_welcome_lock(True)
+            except tk.TclError:
+                self._welcome = None
+            else:
+                return
+        creds = self._jira_creds()
+        if not force and not welcome.should_show_welcome(self.db.get_setting, creds):
+            if creds.is_complete() and (self.db.get_setting("welcome_done", "") or "") != "1":
+                self._mark_welcome_done(dismiss=False)
+            return
+        try:
+            self.notebook.select(self.timesheet_tab)
+        except tk.TclError:
+            pass
+        self._apply_welcome_lock(True)
+        saved_calendars = calendar_feed.saved_ics_urls(self.db.get_setting)
+        overlay = welcome.WelcomeOverlay(
+            self, self.family,
+            on_continue=self._welcome_continue,
+            on_skip=self._welcome_skip,
+            jira_site_url=self.db.get_setting("jira_site_url", "") or creds.site_url or "",
+            jira_email=self.db.get_setting("jira_email", "") or creds.email or "",
+            jira_api_token=self.db.get_setting("jira_api_token", "") or creds.api_token or "",
+            calendar_ics_urls=saved_calendars,
+        )
+        self._welcome = overlay
+
+    def _welcome_continue(self, payload: dict):
+        urls = calendar_feed.normalize_url_list(payload.get("ics_urls") or [])
+        self._persist_calendar_fields({"ics_urls": urls, "overlay_enabled": True})
+        jira = payload.get("jira") or {}
+        creds = self._jira_creds(jira)
+        if creds.is_complete():
+            self._test_jira_connection(jira, from_welcome=True)
+            return
+        if urls:
+            self._set_jira_busy(False, "Calendar link saved. You can add Jira later in Settings.")
+            self._mark_welcome_done()
+            self._refresh_calendar_feed(quiet=True, urls=urls)
+            return
+        self._set_jira_busy(
+            False,
+            "Add a Jira site URL and API token, or an Outlook ICS link, or Skip.")
+
+    def _welcome_skip(self):
+        self._mark_welcome_done()
+
+    def _mark_welcome_done(self, *, dismiss: bool = True):
+        self.db.set_setting("welcome_done", "1")
+        if dismiss:
+            self._dismiss_welcome()
+
+    def _dismiss_welcome(self):
+        overlay = getattr(self, "_welcome", None)
+        self._welcome = None
+        if overlay is not None:
+            try:
+                overlay.destroy()
+            except tk.TclError:
+                pass
+        self._apply_welcome_lock(False)
+
+    def _apply_welcome_lock(self, locked: bool):
+        """Hide header, tabs, Sync, and the Timesheet while welcome is up.
+
+        The Timesheet's rounded sidebar/calendar cards were peeking through
+        the traffic-light strip when only the header/tabs were unpacked.
+        """
+        self._welcome_locked = bool(locked)
+        widgets = (
+            getattr(self, "_header_bar", None),
+            getattr(self, "_header_sep", None),
+            getattr(self, "_tab_row", None),
+            getattr(self, "notebook", None),
+        )
+        for widget in widgets:
+            if widget is None:
+                continue
+            try:
+                if locked:
+                    widget.pack_forget()
+            except tk.TclError:
+                pass
+        if not locked:
+            self._restore_chrome_pack()
+
+    def _restore_chrome_pack(self):
+        bar = getattr(self, "_header_bar", None)
+        if bar is not None:
+            try:
+                bar.pack(fill="x")
+            except tk.TclError:
+                pass
+        sep = getattr(self, "_header_sep", None)
+        if sep is not None:
+            try:
+                sep.pack(fill="x")
+            except tk.TclError:
+                pass
+        tab = getattr(self, "_tab_row", None)
+        if tab is not None:
+            try:
+                tab.pack(fill="x", padx=16, pady=(10, 10))
+            except tk.TclError:
+                pass
+        notebook = getattr(self, "notebook", None)
+        if notebook is not None:
+            try:
+                notebook.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+            except tk.TclError:
+                pass
+
+    def _welcome_blocks_app(self) -> bool:
+        return bool(getattr(self, "_welcome_locked", False) or getattr(self, "_welcome", None))
 
     def _sync_qdms_on_startup(self):
         """Refresh assigned QDMs as soon as the window is up.
@@ -1739,9 +1984,13 @@ class MainWindow(tk.Tk):
         still opens normally. Manual Sync (sidebar / Settings / menu)
         stays noisy so you still get the full result when you ask.
         """
+        if self._welcome_blocks_app():
+            return
         self._sync_qdms_from_jira_fields(None, quiet=True)
 
     def _sync_qdms_from_jira(self):
+        if self._welcome_blocks_app():
+            return
         self._sync_qdms_from_jira_fields(None)
 
     def _sync_qdms_from_jira_fields(self, fields: Optional[dict], *, quiet: bool = False):
@@ -1925,7 +2174,7 @@ class MainWindow(tk.Tk):
                 f"  • {item.key}: {item.detail}" for item in result.failed[:8])
         self._jira_alert("Push to Jira", msg, kind="info")
 
-    def _do_export(self, start_date: str, end_date: str):
+    def _do_export(self, start_date: str, end_date: str, csv_name: str = ""):
         entries = self.db.list_time_entries_between(start_date, end_date)
         if not entries:
             messagebox.showinfo("Nothing to export", "There are no time blocks in that date range.")
@@ -1942,15 +2191,9 @@ class MainWindow(tk.Tk):
         if not filepath:
             return
 
-        display_name = self.db.get_setting("jira_display_name", "") or ""
-        if not display_name:
-            proceed = messagebox.askyesno(
-                "No Display Name set",
-                "You haven't set a Display Name in Settings → Jira Export Settings.\n"
-                "Exported rows will have a blank Display Name. Continue anyway?",
-            )
-            if not proceed:
-                return
+        display_name = (csv_name or self.db.get_setting("jira_display_name", "") or "").strip()
+        if display_name:
+            self.db.set_setting("jira_display_name", display_name)
 
         written, skipped = export_entries(entries, filepath, display_name)
 

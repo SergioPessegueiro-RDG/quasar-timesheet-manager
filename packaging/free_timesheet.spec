@@ -40,10 +40,7 @@ a = Analysis(
     [str(ROOT / "app.py")],
     pathex=[str(ROOT)],
     binaries=[],
-    # No non-code assets to bundle -- every icon/logo/swatch this app draws
-    # is vector code in app/theme.py (Tkinter Canvas calls), not an image
-    # file, so there's nothing under app/ that needs to be listed here.
-    datas=[],
+    datas=[(str(ROOT / "app" / "assets"), "app/assets")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
