@@ -15,7 +15,7 @@ from tkinter import simpledialog, ttk
 from typing import Callable, List, Optional
 
 from . import config, theme
-from .jira_client import preferred_close_transition
+from .jira_client import keep_status_label, transition_menu
 from .models import Activity
 from .sidebar import qdm_combo_rows
 from .panels import _rebind_wheel, _scroll_body
@@ -26,7 +26,6 @@ from .widgets import RoundedButton, RoundedCombobox, show_saved_toast
 # known_jira_projects param) rather than allowing free text that's easy
 # to typo.
 _NEW_JIRA_PROJECT_OPTION = "+ New Project…"
-_KEEP_JIRA_STATUS = "Don't change status"
 
 
 def activity_matching_jira_key(activities: List[Activity], typed: str) -> Optional[Activity]:
@@ -188,7 +187,7 @@ class TimeBlockPanel(tk.Frame):
         row += 1
 
         ttk.Label(frm, text="Jira Status").grid(row=row, column=0, sticky="w", pady=4)
-        self.status_var = tk.StringVar(value=_KEEP_JIRA_STATUS)
+        self.status_var = tk.StringVar(value=keep_status_label())
         self.status_combo = RoundedCombobox(frm, textvariable=self.status_var,
                                              state="readonly", width=30)
         self.status_combo.grid(row=row, column=1, columnspan=2, sticky="ew", pady=4)
@@ -313,15 +312,12 @@ class TimeBlockPanel(tk.Frame):
             self._syncing = False
         self._previous_jira_project = name
 
-    def _keep_status_label(self) -> str:
+    def _current_status_name(self) -> str:
         act = self._selected_activity()
-        current = (act.jira_status or "").strip() if act else ""
-        if current:
-            return f"Don't change ({current})"
-        return _KEEP_JIRA_STATUS
+        return (act.jira_status or "").strip() if act else ""
 
     def _reset_status_combo(self, extra_values=None):
-        keep = self._keep_status_label()
+        keep = keep_status_label(self._current_status_name())
         values = [keep] + list(extra_values or ())
         self.status_combo.config(values=values)
         self.status_var.set(keep)
@@ -353,25 +349,15 @@ class TimeBlockPanel(tk.Frame):
         if seq != self._status_fetch_seq:
             return
         self._transitions = list(transitions or [])
-        keep = self._keep_status_label()
-        labels = [keep]
-        self._transition_by_label = {}
-        close = preferred_close_transition(self._transitions)
-        ordered = []
-        if close is not None:
-            ordered.append(close)
-        ordered.extend(t for t in self._transitions if close is None or t.id != close.id)
-        for trans in ordered:
-            label = trans.label()
-            if trans.closes_ticket() and "close" not in label.lower():
-                label = f"{label} (close)"
-            if label in self._transition_by_label:
-                label = f"{label} [{trans.id}]"
-            self._transition_by_label[label] = trans
-            labels.append(label)
-        self.status_combo.config(values=labels)
-        self.status_var.set(keep)
-        self.status_combo.set(keep)
+        labels, by_label = transition_menu(self._transitions, self._current_status_name())
+        self._transition_by_label = by_label
+        keep = labels[0]
+        try:
+            self.status_combo.config(values=labels)
+            self.status_var.set(keep)
+            self.status_combo.set(keep)
+        except tk.TclError:
+            return
 
     # ------------------------------------------------------------------
     def load(self, activities: List[Activity], day_options,

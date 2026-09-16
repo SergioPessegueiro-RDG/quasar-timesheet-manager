@@ -21,6 +21,7 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 from typing import Callable, Dict, List, Optional, Union
 
 from . import config, theme
+from .jira_client import keep_status_label, transition_menu
 from .models import Activity, Project, TemplateEntry, TimeEntry
 from .version import APP_VERSION
 from .welcome import add_jira_api_token_link
@@ -237,7 +238,13 @@ class ActivityPanel(tk.Frame):
         self.create_project = create_project
         self.on_save: Optional[Callable[[dict], bool]] = None
         self.on_delete: Optional[Callable[[], None]] = None
+        self.on_fetch_transitions: Optional[Callable] = None
         self.project_id_by_label: Dict[str, Optional[int]] = {}
+        self._activity: Optional[Activity] = None
+        self._transitions = []
+        self._transition_by_label = {}
+        self._status_fetch_job = None
+        self._status_fetch_seq = 0
 
         body = _scroll_body(self)
         outer = tk.Frame(body, bg=theme.PANEL_BG)
@@ -274,6 +281,7 @@ class ActivityPanel(tk.Frame):
                                     style="Big.TEntry")
         jira_key_entry.pack(side="left")
         jira_key_entry.bind("<Return>", lambda e: self._save())
+        self.jira_key_number_var.trace_add("write", lambda *_: self._schedule_status_fetch())
         row += 1
 
         ttk.Label(frm, text="Project", style="Big.TLabel").grid(row=row, column=0, sticky="w", pady=10)
@@ -324,6 +332,24 @@ class ActivityPanel(tk.Frame):
         duration_entry.bind("<Return>", lambda e: self._save())
         row += 1
 
+        ttk.Label(frm, text="Jira Status", style="Big.TLabel").grid(
+            row=row, column=0, sticky="w", pady=10)
+        self.status_var = tk.StringVar(value=keep_status_label())
+        self.status_combo = RoundedCombobox(frm, textvariable=self.status_var,
+                                             state="readonly", width=30, style="Big.TCombobox")
+        self.status_combo.grid(row=row, column=1, sticky="ew", pady=10)
+        self.status_combo.bind("<Return>", lambda e: self._save())
+        row += 1
+        self.status_hint = tk.Label(
+            frm,
+            text="Optional. Change the ticket in Jira without logging time. "
+                 "“Work Completed” closes it; when every QDM in that group is "
+                 "closed it leaves the sidebar.",
+            bg=theme.PANEL_BG, fg=theme.TEXT_MUTED, justify="left", wraplength=420,
+            font=(self.family, 9))
+        self.status_hint.grid(row=row, column=1, sticky="w", pady=(0, 10))
+        row += 1
+
         self.error_label = ttk.Label(frm, text="", foreground=theme.DANGER, style="Big.TLabel")
         self.error_label.grid(row=row, column=0, columnspan=2, sticky="w")
         row += 1
@@ -332,9 +358,12 @@ class ActivityPanel(tk.Frame):
         self.btns.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(24, 0))
 
     def load(self, activity: Optional[Activity], on_save: Callable[[dict], bool],
-              on_delete: Optional[Callable[[], None]] = None):
+              on_delete: Optional[Callable[[], None]] = None,
+              on_fetch_transitions: Optional[Callable] = None):
         self.on_save = on_save
         self.on_delete = on_delete
+        self.on_fetch_transitions = on_fetch_transitions
+        self._activity = activity
         self.heading.config(text="Edit QDM" if activity else "Add QDM")
 
         projects = self.get_projects()
@@ -365,6 +394,7 @@ class ActivityPanel(tk.Frame):
         RoundedButton(self.btns, text="Save", style="Accent.TButton",
                       command=self._save).pack(side="right", padx=6)
         _rebind_wheel(self.btns)
+        self._schedule_status_fetch()
 
     def _set_new_project_field_visible(self, visible: bool):
         if visible:
@@ -376,6 +406,59 @@ class ActivityPanel(tk.Frame):
 
     def _on_project_changed(self, _event=None):
         self._set_new_project_field_visible(self.project_var.get() == _NEW_PROJECT_OPTION)
+
+    def _current_status_name(self) -> str:
+        act = self._activity
+        if act is None:
+            return ""
+        typed = config.jira_key_from_number(self.jira_key_number_var.get())
+        stored = (act.jira_key or "").strip()
+        if typed and stored and typed.strip().upper() == stored.upper():
+            return (act.jira_status or "").strip()
+        return ""
+
+    def _reset_status_combo(self, extra_values=None):
+        keep = keep_status_label(self._current_status_name())
+        values = [keep] + list(extra_values or ())
+        self.status_combo.config(values=values)
+        self.status_var.set(keep)
+        self.status_combo.set(keep)
+        self._transition_by_label = {}
+
+    def _schedule_status_fetch(self):
+        if self._status_fetch_job is not None:
+            try:
+                self.after_cancel(self._status_fetch_job)
+            except tk.TclError:
+                pass
+            self._status_fetch_job = None
+        self._status_fetch_job = self.after(200, self._fetch_status_now)
+
+    def _fetch_status_now(self):
+        self._status_fetch_job = None
+        key = config.jira_key_from_number(self.jira_key_number_var.get())
+        if not key or self.on_fetch_transitions is None:
+            self._transitions = []
+            self._reset_status_combo()
+            return
+        self._status_fetch_seq += 1
+        seq = self._status_fetch_seq
+        self._reset_status_combo(["Loading statuses…"])
+        self.on_fetch_transitions(key, lambda trans, seq=seq: self._apply_transitions(seq, trans))
+
+    def _apply_transitions(self, seq: int, transitions):
+        if seq != self._status_fetch_seq:
+            return
+        self._transitions = list(transitions or [])
+        labels, by_label = transition_menu(self._transitions, self._current_status_name())
+        self._transition_by_label = by_label
+        keep = labels[0]
+        try:
+            self.status_combo.config(values=labels)
+            self.status_var.set(keep)
+            self.status_combo.set(keep)
+        except tk.TclError:
+            return
 
     def _save(self):
         name = self.name_var.get().strip()
@@ -406,6 +489,7 @@ class ActivityPanel(tk.Frame):
                 self.error_label.config(text="Choose a project.")
                 return
 
+        trans = self._transition_by_label.get(self.status_var.get())
         result = {
             "name": name,
             "jira_key": config.jira_key_from_number(self.jira_key_number_var.get()),
@@ -416,6 +500,9 @@ class ActivityPanel(tk.Frame):
             # app/config.py's fixed defaults at export time instead.
             "jira_project": None,
             "issue_type": None,
+            "jira_transition_id": trans.id if trans else None,
+            "jira_transition_to_name": (trans.to_name or trans.name) if trans else None,
+            "jira_transition_to_category": trans.to_category if trans else None,
         }
         assert self.on_save is not None
         ok = self.on_save(result)

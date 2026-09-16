@@ -1291,30 +1291,27 @@ class MainWindow(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _save_time_block_and_status(self, inner_save, result: dict):
-        ok = inner_save(result) if inner_save else True
-        if ok is False:
-            return False
+    def _apply_jira_status_change(self, result: dict, *, saved_noun: str) -> bool:
         trans_id = (result.get("jira_transition_id") or "").strip()
         key = (result.get("jira_key") or "").strip()
         if not trans_id or not key:
-            return ok
+            return True
         creds = self._jira_creds()
         if not creds.is_complete():
             self._jira_alert(
                 "Jira status",
-                "The time block was saved, but Jira isn’t configured so the "
+                f"{saved_noun} was saved, but Jira isn’t configured so the "
                 "ticket status was left as-is.")
-            return ok
+            return True
         try:
             jira_client.transition_issue(creds, key, trans_id)
         except Exception as exc:
             jira_client._log(f"transition_issue {key} failed: {exc}")
             self._jira_alert(
                 "Jira status",
-                "The time block was saved, but Jira didn’t accept the status "
+                f"{saved_noun} was saved, but Jira didn’t accept the status "
                 f"change:\n\n{exc}")
-            return ok
+            return True
         act = self.db.get_activity_by_jira_key(key)
         if act is not None:
             to_name = (result.get("jira_transition_to_name") or "").strip()
@@ -1325,6 +1322,21 @@ class MainWindow(tk.Tk):
                 act.jira_status_category = to_cat
             self.db.update_activity(act)
             self._on_sidebar_change()
+        return True
+
+    def _save_time_block_and_status(self, inner_save, result: dict):
+        ok = inner_save(result) if inner_save else True
+        if ok is False:
+            return False
+        self._apply_jira_status_change(result, saved_noun="The time block")
+        return ok
+
+    def _save_activity_and_status(self, inner_save, result: dict):
+        payload = {k: v for k, v in result.items() if not k.startswith("jira_transition")}
+        ok = inner_save(payload) if inner_save else True
+        if ok is False:
+            return False
+        self._apply_jira_status_change(result, saved_noun="The QDM")
         return ok
 
     def _open_duplicate_panel(self, **kwargs):
@@ -1334,7 +1346,9 @@ class MainWindow(tk.Tk):
 
     def _open_activity_panel(self, activity, on_save, on_delete=None):
         self._ensure_secondary_tabs(now=True)
-        self.activity_panel.load(activity, on_save, on_delete)
+        self.activity_panel.load(
+            activity, lambda result, inner=on_save: self._save_activity_and_status(inner, result),
+            on_delete, on_fetch_transitions=self._fetch_jira_transitions)
         self._show_panel(self.activity_panel)
 
     def _open_project_panel(self, project, on_save, on_delete=None):

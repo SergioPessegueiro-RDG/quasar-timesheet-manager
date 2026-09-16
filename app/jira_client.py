@@ -643,6 +643,16 @@ def parse_transitions(payload: Any) -> List[JiraTransition]:
     return out
 
 
+KEEP_JIRA_STATUS = "Don't change status"
+
+
+def keep_status_label(current_status: Optional[str] = None) -> str:
+    current = (current_status or "").strip()
+    if current:
+        return f"Don't change ({current})"
+    return KEEP_JIRA_STATUS
+
+
 def preferred_close_transition(transitions: List[JiraTransition]) -> Optional[JiraTransition]:
     """Work Completed first, then any Done-category status."""
     for trans in transitions:
@@ -652,6 +662,30 @@ def preferred_close_transition(transitions: List[JiraTransition]) -> Optional[Ji
         if trans.closes_ticket():
             return trans
     return None
+
+
+def transition_menu(
+    transitions: List[JiraTransition],
+    current_status: Optional[str] = None,
+) -> Tuple[List[str], Dict[str, JiraTransition]]:
+    """Labels for a status combobox: keep-as-is first, close options next."""
+    keep = keep_status_label(current_status)
+    labels = [keep]
+    by_label: Dict[str, JiraTransition] = {}
+    close = preferred_close_transition(transitions)
+    ordered: List[JiraTransition] = []
+    if close is not None:
+        ordered.append(close)
+    ordered.extend(t for t in transitions if close is None or t.id != close.id)
+    for trans in ordered:
+        label = trans.label()
+        if trans.closes_ticket() and "close" not in label.lower():
+            label = f"{label} (close)"
+        if label in by_label:
+            label = f"{label} [{trans.id}]"
+        by_label[label] = trans
+        labels.append(label)
+    return labels, by_label
 
 
 def list_transitions(creds: JiraCredentials, issue_key: str) -> List[JiraTransition]:

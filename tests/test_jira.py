@@ -570,6 +570,33 @@ class TestTransitions(unittest.TestCase):
         self.assertTrue(close.closes_ticket())
         self.assertFalse(trans[0].closes_ticket())
 
+    def test_keep_status_label_includes_current_name(self):
+        self.assertEqual(jira_client.keep_status_label(None), "Don't change status")
+        self.assertEqual(jira_client.keep_status_label(""), "Don't change status")
+        self.assertEqual(
+            jira_client.keep_status_label("In Progress"),
+            "Don't change (In Progress)")
+
+    def test_transition_menu_puts_close_first(self):
+        trans = jira_client.parse_transitions({
+            "transitions": [
+                {"id": "21", "name": "In Progress", "to": {
+                    "name": "In Progress",
+                    "statusCategory": {"key": "indeterminate"},
+                }},
+                {"id": "31", "name": "Work Completed", "to": {
+                    "name": "Work Completed",
+                    "statusCategory": {"key": "done"},
+                }},
+            ]
+        })
+        labels, by_label = jira_client.transition_menu(trans, "To Do")
+        self.assertEqual(labels[0], "Don't change (To Do)")
+        self.assertTrue(any("(close)" in label or "Work Completed" in label for label in labels[1:]))
+        close_label = next(label for label in labels[1:] if by_label[label].id == "31")
+        self.assertEqual(by_label[close_label].id, "31")
+        self.assertEqual(labels[1], close_label)
+
     def test_work_completed_status_is_closed_locally(self):
         act = Activity(1, "QA Planning", jira_key="QDM-5557",
                        jira_status="Work Completed", jira_status_category="done")

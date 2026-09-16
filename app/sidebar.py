@@ -868,7 +868,15 @@ class Sidebar(tk.Frame):
             self._projects = self.db.list_projects()
 
         def on_save(result):
-            self.db.add_activity(Activity(None, **result))
+            self.db.add_activity(Activity(
+                None,
+                name=result["name"],
+                jira_key=result["jira_key"],
+                default_duration_minutes=result["default_duration_minutes"],
+                project_id=result["project_id"],
+                jira_project=result["jira_project"],
+                issue_type=result["issue_type"],
+            ))
             self.on_change()
             return True
 

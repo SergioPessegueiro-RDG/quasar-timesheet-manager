@@ -418,6 +418,10 @@ win.update()
 apanel2 = win.activity_panel
 check("Add QDM heading reads \"Edit QDM\" when editing an existing activity",
       apanel2.heading.cget("text") == "Edit QDM")
+check("Edit QDM has a Jira Status dropdown so a ticket can be closed without logging time",
+      hasattr(apanel2, "status_combo"))
+check("Edit QDM status starts on don't-change",
+      "Don't change" in (apanel2.status_var.get() or ""))
 check("Add QDM tab's Project dropdown defaults to the activity's current project",
       apanel2.project_var.get() == db.get_project(design_review.project_id).name)
 apanel2.project_var.set("Client A")
