@@ -171,5 +171,88 @@ class TestUnsentMarker(unittest.TestCase):
                 for i in unsent))
 
 
+class TestPlaceAnywhereOnGrid(unittest.TestCase):
+    """Logged blocks can be created and moved before the current time."""
+
+    def setUp(self):
+        import tkinter as tk
+        self.root = tk.Tk()
+        self.root.withdraw()
+        handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        handle.close()
+        self.db_path = handle.name
+        self.db = Database(self.db_path)
+        self.opened = []
+        self.cal = CalendarGrid(
+            self.root, self.db,
+            get_armed_activity=lambda: None,
+            clear_armed_activity=lambda: None,
+            open_time_block=lambda **kwargs: self.opened.append(kwargs),
+        )
+        self.cal.gutter_width = 40
+        self.cal.day_width = 100
+        self.cal.header_height = 24
+        self.cal.px_per_min = 1.0
+        self.cal._set_live_block = lambda *_a, **_k: None
+        act_id = self.db.add_activity(Activity(None, "Deep Work", "QDM-1", color="#4C6EF5"))
+        self.act = self.db.get_activity(act_id)
+
+    def tearDown(self):
+        try:
+            self.db.close()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        os.unlink(self.db_path)
+
+    def _event(self, day_idx, minute, dy=0):
+        x = self.cal.gutter_width + day_idx * self.cal.day_width + 10
+        y = self.cal.header_height + minute * self.cal.px_per_min + dy
+        return types.SimpleNamespace(x=x, y=y, x_root=x, y_root=y, state=0)
+
+    def test_snapped_minute_at_grid_top_is_start_of_day_not_now(self):
+        y = self.cal.header_height
+        self.assertEqual(self.cal._snapped_minute_for_y(y), 0)
+        self.assertEqual(self.cal._view_minute_to_hhmm(0), "09:00")
+
+    def test_drag_create_opens_time_block_at_start_of_day(self):
+        start = self._event(2, 0)
+        moved = self._event(2, 30)
+        self.cal._on_button1(start)
+        self.cal._on_motion_drag(moved)
+        self.cal._on_release(moved)
+        self.assertEqual(len(self.opened), 1)
+        self.assertEqual(self.opened[0].get("initial_start"), "09:00")
+        self.assertEqual(self.opened[0].get("initial_end"), "09:30")
+
+    def test_move_afternoon_block_to_start_of_day(self):
+        entry_id = self.db.add_time_entry(TimeEntry(
+            None, self.act.id, self.act.name, self.act.jira_key, self.act.color,
+            self.cal.day_date(2).isoformat(), "16:00", "17:00", "notes"))
+        self.cal.refresh()
+        start_min = self.cal._view_hhmm_to_minute("16:00")
+        self.cal._on_button1(self._event(2, start_min + 20))
+        self.assertEqual(self.cal._drag_state["mode"], "move")
+        self.cal._on_motion_drag(self._event(2, 0))
+        self.cal._on_release(self._event(2, 0))
+        entry = self.db.get_time_entry(entry_id)
+        self.assertEqual(entry.start_time, "09:00")
+        self.assertEqual(entry.end_time, "10:00")
+
+    def test_nudge_up_reaches_start_of_day(self):
+        entry_id = self.db.add_time_entry(TimeEntry(
+            None, self.act.id, self.act.name, self.act.jira_key, self.act.color,
+            self.cal.day_date(1).isoformat(), "09:15", "09:45", "notes"))
+        self.cal.refresh()
+        self.cal.selected_entry_id = entry_id
+        self.cal._nudge_selected_entry(minute_delta=-config.SLOT_MINUTES)
+        entry = self.db.get_time_entry(entry_id)
+        self.assertEqual(entry.start_time, "09:00")
+        self.assertEqual(entry.end_time, "09:30")
+
+
 if __name__ == "__main__":
     unittest.main()

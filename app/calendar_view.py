@@ -449,15 +449,12 @@ class CalendarGrid(tk.Frame):
         # Below its MIN_DAY_WIDTH_PX/MIN_SLOT_HEIGHT_PX floor, the grid
         # used to have no way to reach content that no longer fit its
         # window -- it just silently clipped at the canvas edge. Fixed by
-        # NOT scrolling self.canvas itself (every drag/resize/hit-test
-        # handler below reads raw event.x/event.y, which would need
-        # converting to self.canvas.canvasx()/canvasy() everywhere the
-        # moment self.canvas's own view could shift -- too easy to miss
-        # one of those call sites and silently break dragging). Instead,
-        # self.canvas is placed as a single fixed-size window inside
-        # `_scroll_host`, a separate plain Canvas that does the actual
-        # scrolling -- self.canvas's own coordinate space never moves, so
-        # every existing handler keeps working unchanged.
+        # NOT scrolling self.canvas itself. Click/drag/hover go through
+        # `_grid_xy` (host canvasx/canvasy) because a clipped nested
+        # canvas reports viewport-relative event.x/y once `_scroll_host`
+        # is panned — which is how slots above the now-line became
+        # untargetable. self.canvas is a single fixed-size window inside
+        # `_scroll_host`, which does the actual scrolling.
         self._scroll_host = tk.Canvas(canvas_holder, bg=theme.GRID_BG, highlightthickness=0)
         self._scroll_host.grid(row=0, column=0, sticky="nsew")
 
@@ -704,7 +701,7 @@ class CalendarGrid(tk.Frame):
         Split out from _on_canvas_resize so _zoom_in/_zoom_out can call
         this directly, reusing the last known viewport size, without
         needing an actual resize event to have just fired."""
-        self._update_view_hours(self._db_list_entries())
+        self._update_view_hours(self._db_list_entries(), extra=self._overlay_events())
         num_days = len(config.DAY_NAMES)
         num_slots = self._view_minutes_total() / config.SLOT_MINUTES
 
@@ -1357,7 +1354,11 @@ class CalendarGrid(tk.Frame):
 
         self._draw_day_totals(totals, today)
 
-        c.config(scrollregion=c.bbox("all"))
+        # Do not give this nested canvas its own scrollregion. `_scroll_host`
+        # is the only scroller; bbox("all") here made Tk treat the inner
+        # canvas as a second one, so event.y no longer matched item
+        # coordinates once the host was panned — slots above the now-line
+        # stopped being creatable or droppable.
 
     def _schedule_entry_paint(self):
         if self._entry_paint_job is not None:
@@ -1482,11 +1483,15 @@ class CalendarGrid(tk.Frame):
             x0 = self.gutter_width + i * self.day_width
             x1 = x0 + self.day_width
             y = grid_top + minute_of_day * self.px_per_min
+            # Tight shapes only. A full-width create_line can report a bbox
+            # from y=0 down to the line, which would steal hits on every
+            # slot before now.
             self.canvas.create_oval(
                 x0 - 3, y - 3, x0 + 3, y + 3,
                 fill=theme.NOW_LINE, outline="", tags="now_line")
-            self.canvas.create_line(
-                x0, y, x1, y, fill=theme.NOW_LINE, width=1.5, tags="now_line")
+            self.canvas.create_rectangle(
+                x0, y - 1, x1, y + 1,
+                fill=theme.NOW_LINE, outline="", tags="now_line")
             return
 
     def _update_hint(self):
@@ -1874,12 +1879,15 @@ class CalendarGrid(tk.Frame):
         return None
 
     def _snapped_minute_for_y(self, y: float) -> int:
+        """Map a grid y to a slot. Bounded only by the visible day, never by now."""
         raw = (y - self.header_height) / self.px_per_min
         snapped = round(raw / config.SLOT_MINUTES) * config.SLOT_MINUTES
         return max(0, min(self._view_minutes_total(), snapped))
 
     def _entry_id_at(self, x: float, y: float) -> Optional[int]:
-        for item in self.canvas.find_overlapping(x, y, x, y):
+        # Topmost item wins so a later block's hit-box cannot cover empty
+        # morning slots (or the now-line) sitting visually underneath.
+        for item in reversed(self.canvas.find_overlapping(x, y, x, y)):
             for t in self.canvas.gettags(item):
                 if t.startswith("entry_"):
                     return int(t.split("_", 1)[1])
@@ -1906,7 +1914,8 @@ class CalendarGrid(tk.Frame):
         # after the click that a user would naturally expect to enable them.
         self.canvas.focus_set()
 
-        entry_id = self._entry_id_at(event.x, event.y)
+        x, y = self._grid_xy(event)
+        entry_id = self._entry_id_at(x, y)
         if entry_id is not None:
             if event.state & CONTROL_STATE_MASK:
                 # Ctrl+click on a block duplicates it on the spot -- a
@@ -1919,7 +1928,7 @@ class CalendarGrid(tk.Frame):
                 self._duplicate_entry_in_place(entry_id)
                 self._drag_state = None
                 return
-            region = self._hit_region(entry_id, event.y)
+            region = self._hit_region(entry_id, y)
             entry = self.entries_by_id[entry_id]
             day_idx = self._entry_day_idx(entry)
             self._drag_state = {
@@ -1929,8 +1938,8 @@ class CalendarGrid(tk.Frame):
                 "start_day_idx": day_idx,
                 "start_minute": self._view_hhmm_to_minute(entry.start_time),
                 "end_minute": self._view_hhmm_to_minute(entry.end_time),
-                "anchor_x": event.x,
-                "anchor_y": event.y,
+                "anchor_x": x,
+                "anchor_y": y,
                 "moved": False,
             }
             return
@@ -1943,18 +1952,18 @@ class CalendarGrid(tk.Frame):
             self.selected_entry_id = None
             self.refresh()
 
-        day_idx = self._day_idx_for_x(event.x)
+        day_idx = self._day_idx_for_x(x)
         if day_idx is None:
             return
-        minute = self._snapped_minute_for_y(event.y)
+        minute = self._snapped_minute_for_y(y)
         self._drag_state = {
             "mode": "create",
             "anchor_day_idx": day_idx,
             "anchor_minute": minute,
             "cur_day_idx": day_idx,
             "cur_minute": minute,
-            "anchor_x": event.x,
-            "anchor_y": event.y,
+            "anchor_x": x,
+            "anchor_y": y,
             "preview_rect": None,
             "moved": False,
         }
@@ -1980,7 +1989,8 @@ class CalendarGrid(tk.Frame):
         edit dialog, which is the one unambiguous thing a double-click on
         a block should do.
         """
-        entry_id = self._entry_id_at(event.x, event.y)
+        x, y = self._grid_xy(event)
+        entry_id = self._entry_id_at(x, y)
         if entry_id is None:
             return
         self._drag_state = None
@@ -1994,25 +2004,27 @@ class CalendarGrid(tk.Frame):
         state = self._drag_state
         if state.get("mode") == "qdm-drop":
             return
-        dx = event.x - state["anchor_x"]
-        dy = event.y - state["anchor_y"]
+        self._autoscroll_for_pointer(event)
+        x, y = self._grid_xy(event)
+        dx = x - state["anchor_x"]
+        dy = y - state["anchor_y"]
         if abs(dx) > config.DRAG_THRESHOLD_PX or abs(dy) > config.DRAG_THRESHOLD_PX:
             state["moved"] = True
 
         if state["mode"] == "create":
-            self._update_create_preview(event, state)
+            self._update_create_preview(x, y, state)
         elif state["mode"] in ("resize-top", "resize-bottom", "move"):
             # Only touch the real canvas items once an actual drag (past the
             # click threshold) is confirmed -- sub-pixel jitter on a plain
             # click must never mutate/replace the settled entry item.
             if state["moved"]:
-                self._update_entry_drag_preview(event, state)
+                self._update_entry_drag_preview(x, y, state)
 
-    def _update_create_preview(self, event, state: dict):
-        day_idx = self._day_idx_for_x(event.x)
+    def _update_create_preview(self, x, y, state: dict):
+        day_idx = self._day_idx_for_x(x)
         if day_idx is None:
             day_idx = state["anchor_day_idx"]
-        minute = self._snapped_minute_for_y(event.y)
+        minute = self._snapped_minute_for_y(y)
         state["cur_day_idx"] = state["anchor_day_idx"]  # creation stays within the starting day
         state["cur_minute"] = minute
 
@@ -2030,7 +2042,7 @@ class CalendarGrid(tk.Frame):
             state, "preview_rect", x0, y0, x1, y1,
             fill=theme.PREVIEW_FILL, mute=False)
 
-    def _update_entry_drag_preview(self, event, state: dict):
+    def _update_entry_drag_preview(self, x, y, state: dict):
         entry = state["orig_entry"]
 
         if "drag_rect_id" not in state:
@@ -2051,23 +2063,23 @@ class CalendarGrid(tk.Frame):
         duration = state["end_minute"] - state["start_minute"]
 
         if state["mode"] == "resize-top":
-            new_start = self._snapped_minute_for_y(event.y)
+            new_start = self._snapped_minute_for_y(y)
             new_start = min(new_start, state["end_minute"] - config.SLOT_MINUTES)
             new_start = max(0, new_start)
             new_end = state["end_minute"]
             day_idx = state["start_day_idx"]
         elif state["mode"] == "resize-bottom":
-            new_end = self._snapped_minute_for_y(event.y)
+            new_end = self._snapped_minute_for_y(y)
             new_end = max(new_end, state["start_minute"] + config.SLOT_MINUTES)
             new_end = min(self._view_minutes_total(), new_end)
             new_start = state["start_minute"]
             day_idx = state["start_day_idx"]
         else:  # move
-            dy_minutes = round((event.y - state["anchor_y"]) / self.px_per_min / config.SLOT_MINUTES) * config.SLOT_MINUTES
+            dy_minutes = round((y - state["anchor_y"]) / self.px_per_min / config.SLOT_MINUTES) * config.SLOT_MINUTES
             new_start = state["start_minute"] + dy_minutes
             new_start = max(0, min(self._view_minutes_total() - duration, new_start))
             new_end = new_start + duration
-            day_idx = self._day_idx_for_x(event.x)
+            day_idx = self._day_idx_for_x(x)
             if day_idx is None:
                 day_idx = state["start_day_idx"]
 
@@ -2323,6 +2335,67 @@ class CalendarGrid(tk.Frame):
         except tk.TclError:
             return x_root - hx, y_root - hy
 
+    def _grid_xy(self, event):
+        """Pointer position in the inner grid's coordinate space.
+
+        Raw event.x/y on this nested canvas are viewport-relative once
+        `_scroll_host` has been panned, so the visible top maps to
+        minute 0. After you scroll down to the now-line, every slot
+        above it (before the current time) becomes untargetable. QDM
+        drop already converted through `_canvas_xy_from_root`; click /
+        drag / hover must do the same.
+
+        Synthetic tests copy x→x_root; those stay on event.x/y.
+        """
+        x_root = getattr(event, "x_root", None)
+        y_root = getattr(event, "y_root", None)
+        try:
+            mapped = bool(self._scroll_host.winfo_ismapped())
+        except (tk.TclError, AttributeError):
+            mapped = False
+        if (
+            mapped
+            and x_root is not None
+            and y_root is not None
+            and (x_root != event.x or y_root != event.y)
+        ):
+            pos = self._canvas_xy_from_root(x_root, y_root, require_inside=False)
+            if pos is not None:
+                return pos
+        try:
+            return float(self.canvas.canvasx(event.x)), float(self.canvas.canvasy(event.y))
+        except (tk.TclError, AttributeError, TypeError):
+            return float(event.x), float(event.y)
+
+    _DRAG_SCROLL_MARGIN_PX = 28
+    _DRAG_SCROLL_STEP_PX = 36
+
+    def _autoscroll_for_pointer(self, event):
+        """Pan the grid when a drag is held against the viewport edge.
+
+        A create/move cannot enter times that are scrolled off-screen,
+        which is often everything before the now-line.
+        """
+        x_root = getattr(event, "x_root", None)
+        y_root = getattr(event, "y_root", None)
+        if x_root is None or y_root is None:
+            return
+        if x_root == event.x and y_root == event.y:
+            return
+        try:
+            host = self._scroll_host
+            hy = host.winfo_rooty()
+            hh = host.winfo_height()
+        except (tk.TclError, AttributeError):
+            return
+        if hh <= 1:
+            return
+        margin = self._DRAG_SCROLL_MARGIN_PX
+        if y_root < hy + margin:
+            self._nudge_scroll_pixels("y", self._DRAG_SCROLL_STEP_PX)
+        elif y_root > hy + hh - margin:
+            self._nudge_scroll_pixels("y", -self._DRAG_SCROLL_STEP_PX)
+
     def _on_qdm_drop_motion(self, event):
         state = self._drag_state
         if not state or state.get("mode") != "qdm-drop":
@@ -2484,14 +2557,15 @@ class CalendarGrid(tk.Frame):
         if self._drag_state:
             self._clear_hover_preview()
             return
-        entry_id = self._entry_id_at(event.x, event.y)
+        x, y = self._grid_xy(event)
+        entry_id = self._entry_id_at(x, y)
         if entry_id is not None:
             self._clear_hover_preview()
             if event.state & CONTROL_STATE_MASK:
                 # Hints at the Ctrl+click-to-duplicate shortcut.
                 self.canvas.config(cursor="plus")
                 return
-            region = self._hit_region(entry_id, event.y)
+            region = self._hit_region(entry_id, y)
             cursor = "sb_v_double_arrow" if region != "move" else "fleur"
             self.canvas.config(cursor=cursor)
         else:
@@ -2500,7 +2574,7 @@ class CalendarGrid(tk.Frame):
             if armed:
                 self._clear_hover_preview()
             else:
-                self._update_hover_preview(event.x, event.y)
+                self._update_hover_preview(x, y)
 
     def _clear_hover_preview(self):
         if self._hover_slot is None:
@@ -2546,7 +2620,8 @@ class CalendarGrid(tk.Frame):
     # Right-click menu
     # ------------------------------------------------------------------
     def _on_right_click(self, event):
-        entry_id = self._entry_id_at(event.x, event.y)
+        x, y = self._grid_xy(event)
+        entry_id = self._entry_id_at(x, y)
         if entry_id is not None:
             entry = self.entries_by_id[entry_id]
             menu = tk.Menu(self, tearoff=0)
@@ -2556,7 +2631,7 @@ class CalendarGrid(tk.Frame):
             menu.add_command(label="Delete", command=lambda: self._delete_entry(entry))
             menu.tk_popup(event.x_root, event.y_root)
             return
-        meeting = self._overlay_event_at(event.x, event.y)
+        meeting = self._overlay_event_at(x, y)
         if meeting is None:
             return
         self._show_meeting_details(meeting)
